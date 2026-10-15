@@ -1,0 +1,18 @@
+/* Skerry — Russian texts of the macOS permission requests. */
+"CFBundleDisplayName" = "Skerry";
+"NSAppleEventsUsageDescription" = "Skerry управляет Spotify, Apple Music и Заметками через AppleScript.";
+"NSAppleMusicUsageDescription" = "Skerry обращается к Apple Music за анимированными обложками для экрана блокировки.";
+"NSAudioCaptureUsageDescription" = "Skerry нужен доступ к звуку, чтобы показывать волну музыки в реальном времени и менять громкость отдельных приложений. Звук обрабатывается только на лету и никогда не записывается и не сохраняется.";
+"NSBluetoothAlwaysUsageDescription" = "Skerry нужен Bluetooth, чтобы замечать подключение аудиоустройств и показывать их заряд в HUD.";
+"NSCalendarsFullAccessUsageDescription" = "Показывает события календаря в вырезе.";
+"NSCalendarsUsageDescription" = "Нужно для режима календаря.";
+"NSCameraUsageDescription" = "Камера нужна для режима «Зеркало».";
+"NSDesktopFolderUsageDescription" = "Skerry читает папку скриншотов (Рабочий стол, если не выбрана ~/Screenshots), чтобы собирать новые скриншоты в пачки.";
+"NSDocumentsFolderUsageDescription" = "Skerry нужен доступ, чтобы сохранять и читать файлы, перетащенные на панель файлов.";
+"NSDownloadsFolderUsageDescription" = "Skerry нужен доступ, чтобы читать файлы в папке «Загрузки».";
+"NSLocationUsageDescription" = "Skerry использует геопозицию, чтобы показывать точную погоду на экране блокировки.";
+"NSLocationWhenInUseUsageDescription" = "Skerry использует геопозицию, чтобы показывать точную погоду на экране блокировки.";
+"NSMicrophoneUsageDescription" = "Skerry нужен микрофон, чтобы записывать голосовые вопросы для ИИ-ассистента.";
+"NSRemindersFullAccessUsageDescription" = "Skerry нужен доступ к Напоминаниям, чтобы показывать ваши напоминания.";
+"NSRemindersUsageDescription" = "Skerry нужен доступ к Напоминаниям, чтобы показывать ваши напоминания.";
+"NSScreenCaptureUsageDescription" = "Skerry нужна запись экрана, чтобы делать снимки для ИИ-ассистента.";

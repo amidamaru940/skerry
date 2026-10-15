@@ -1,0 +1,15 @@
+// Skerry — a fork of Atoll (DynamicIsland)
+// Signing of the app target.
+//
+// Without a team the app is signed to run on this Mac only (ad-hoc): what
+// the public build and anyone building from source get. To sign with your
+// own team, so that macOS keeps permissions such as Accessibility across
+// rebuilds, create Config/Local.xcconfig (git ignores it) with:
+//
+//     DEVELOPMENT_TEAM = ABCDE12345
+//     CODE_SIGN_IDENTITY = Apple Development
+
+CODE_SIGN_IDENTITY = -
+DEVELOPMENT_TEAM =
+
+#include? "Local.xcconfig"

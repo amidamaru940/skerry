@@ -1,0 +1,77 @@
+# Network address allowlist for Skerry (fork of Atoll).
+#
+# tests/test_network_allowlist.py collects every "http://" / "https://" string
+# literal from the app sources (DynamicIsland/) and fails when one is missing
+# here, or when an entry here no longer appears in the sources.
+# A URL is cut where string interpolation starts, e.g. "https://lrclib.net/api/search?track_name=".
+#
+# Format:  URL | feature | how it is enabled (Defaults key = value, or a note)
+# Everything that makes requests is off by default (Skerry phase 3).
+
+# --- Requests made by the app, each behind a setting that is off by default ---
+
+https://wttr.in/ | Lock screen weather (wttr.in provider, IP-based location when no coordinates) | enableLockScreenWeatherWidget = true
+https://api.open-meteo.com/v1/forecast | Lock screen weather (Open-Meteo provider) | enableLockScreenWeatherWidget = true
+https://air-quality-api.open-meteo.com/v1/air-quality | Lock screen weather: air quality | enableLockScreenWeatherWidget = true (and lockScreenWeatherShowsAQI)
+https://generativelanguage.googleapis.com/v1beta/models/ | Screen Assistant: Gemini (sends screenshots/text) | enableScreenAssistant = true + Gemini API key
+https://api.openai.com/v1/chat/completions | Screen Assistant: OpenAI | enableScreenAssistant = true + OpenAI API key
+https://api.groq.com/openai/v1/chat/completions | Screen Assistant: Groq | enableScreenAssistant = true + Groq API key
+https://api.anthropic.com/v1/messages | Screen Assistant: Anthropic | enableScreenAssistant = true + Claude API key
+http://localhost:11434 | Screen Assistant: local Ollama endpoint (default value of localModelEndpoint; loopback) | enableScreenAssistant = true + local provider selected
+https://api.anthropic.com/api/oauth/usage | LLM usage monitor: Claude quota | enableLLMUsageFeature = true
+https://platform.claude.com/v1/oauth/token | LLM usage monitor: Claude OAuth token refresh | enableLLMUsageFeature = true
+https://chatgpt.com/backend-api/wham/usage | LLM usage monitor: Codex quota | enableLLMUsageFeature = true
+https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage | LLM usage monitor: Cursor quota | enableLLMUsageFeature = true
+https://cursor.com/api/usage-summary | LLM usage monitor: Cursor usage summary | enableLLMUsageFeature = true
+https://daily-cloudcode-pa.googleapis.com | LLM usage monitor: Antigravity (fallback when the local language server is unavailable) | enableLLMUsageFeature = true
+https://cloudcode-pa.googleapis.com | LLM usage monitor: Antigravity (fallback) | enableLLMUsageFeature = true
+https://raw.githubusercontent.com/Ebullioscopic/Atoll/dev/DynamicIsland/managers/LLMUsage/pricing.json | LLM usage monitor: remote model prices (bundled copy is used otherwise) | enableLLMUsageFeature = true
+https://lrclib.net/api/search?track_name= | Lyrics: LRCLIB (sends track title and artist) | enableLyrics = true
+https://music.163.com/api/search/get/web?s= | Lyrics: NetEase search (sends track title and artist) | enableLyrics = true
+https://music.163.com/api/song/lyric?id= | Lyrics: NetEase lyric download | enableLyrics = true
+https://itunes.apple.com/search?term= | Music: explicit-content badge lookup (sends track title and artist) | enableOnlineTrackLookups = true
+https://open.spotify.com/embed/track/ | Music: Spotify explicit badge and artist names (sends the Spotify track id) | enableOnlineTrackLookups = true
+https://api.music.apple.com/v1/catalog/ | Apple Music animated artwork (MusicKit permission prompt) | lockScreenMusicFullscreenVideoArtwork = true
+https://mvod | Apple Music animated artwork: regex for the HLS video URL returned by api.music.apple.com (no request of its own) | lockScreenMusicFullscreenVideoArtwork = true
+https://api.spotify.com/v1/tracks/ | Spotify Web API: artist names | signed in to Spotify (sp_dc cookie) in Settings and enableOnlineTrackLookups = true
+https://spclient.wg.spotify.com/canvaz-cache/v0/canvases | Spotify Canvas (animated covers) | signed in to Spotify (sp_dc cookie) in Settings
+https://open.spotify.com/api/token | Spotify web-player token for Canvas | signed in to Spotify (sp_dc cookie) in Settings
+https://raw.githubusercontent.com/xyloflake/spot-secrets-go/main/secrets/secretDict.json | Spotify web-player token: TOTP secrets (third-party GitHub file) | signed in to Spotify (sp_dc cookie) in Settings
+https://accounts.spotify.com/authorize | Spotify like button: OAuth sign-in | user signs in under Settings > Media > Spotify
+https://accounts.spotify.com/api/token | Spotify like button: OAuth token | user signs in under Settings > Media > Spotify
+https://api.spotify.com/v1 | Spotify Web API: library / like state | signed in via Spotify OAuth in Settings
+https://accounts.spotify.com/en/login | Spotify sign-in page shown in a web view | user opens the Spotify sign-in sheet
+https://assets9.lottiefiles.com/packages/lf20_mniampqn.json | Music visualizer animation loaded from LottieFiles | useMusicVisualizer = false (default true: built-in visualizer, no request)
+https://raw.githubusercontent.com/Ebullioscopic/Atoll/main/Updates | Sparkle update feed (Atoll) | never: SoftwareUpdatePolicy.isEnabled = false (the updater is not created)
+
+# --- Loopback only (this Mac), each behind the matching media source ---
+
+http://localhost | Cider favourite button: Cider's local API on port 10767 | media source Cider and Cider running
+http://localhost:26538 | YouTube Music (th-ch / Pear Desktop) companion API on this Mac | media source YouTube Music
+
+# --- Links opened in the browser only when clicked (no request by the app) ---
+
+https://github.com/Ebullioscopic/DynamicIsland | About: "Atoll on GitHub" credit link | click
+https://getatoll.app/marketplace | Extensions: marketplace link | click
+https://developer.spotify.com/dashboard | Spotify settings: developer dashboard link | click
+https://open.spotify.com | Spotify settings: link and instruction text | click
+https://open.spotify.com/ | Spotify sign-in sheet: external sign-in link; also the Referer header of the token request above | click / signed in to Spotify
+https://github.com/Paxsenix0/Spotify-Canvas-API | Spotify settings: Canvas API link | click
+https://github.com/Paxsenix0/Spotify-Canvas-API#how-to-get-sp_dc-cookie | Spotify sign-in sheet: cookie instructions link | click
+https://betterdisplay.pro | Settings text link (BetterDisplay) | click
+https://lunar.fyi | Settings text link (Lunar) | click
+https://github.com/th-ch/youtube-music | YouTube Music link (settings) | click
+https://aistudio.google.com/app/apikey | Screen Assistant: Gemini API key page | click
+
+# --- Not network addresses: schemes, placeholders, identifiers, comments ---
+
+http:// | URL scheme prefix checks and display stripping | none
+https:// | URL scheme prefix checks; initial text of the New API base-URL field | none
+https://apple.com | Dummy item used only to enumerate share services (never loaded) | none
+https://example.com/animation.json | Text field placeholder | none
+http://www.apple.com/DTDs/PropertyList-1.0.dtd | Property list DOCTYPE | none
+http://www.w3.org/2000/svg | SVG namespace | none
+https://www.gnu.org/licenses/ | GPL licence headers | none
+https://github.com/ZephyrCodesStuff/rtaudio | Attribution comment | none
+https://github.com/migueldeicaza/SwiftTerm | Attribution comment | none
+https://github.com/waydabber/BetterDisplay/wiki/Integration-features,-CLI#osd-notification-dispatch-integration | Code comment | none
