@@ -1,0 +1,24 @@
+name: Idea
+description: Something Skerry could do better.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: The situation and what gets in the way today.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would help?
+      description: How you imagine it. Skerry keeps the island calm, so fewer buttons beat more.
+  - type: dropdown
+    id: network
+    attributes:
+      label: Does it need the internet?
+      description: Anything networked stays off until the user turns it on.
+      options:
+        - "No"
+        - "Yes, as an opt-in"

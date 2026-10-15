@@ -179,3 +179,6 @@ Config/Local.xcconfig
 # Pinned dependency versions belong to the project (the swiftpm/ rule above ignores them).
 !DynamicIsland.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/
 !DynamicIsland.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
+
+# Private tooling in docs/ (never exported) is part of this repository.
+!docs/tools/*.py
