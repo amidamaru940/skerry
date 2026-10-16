@@ -5,6 +5,16 @@ All notable changes to Skerry are documented here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). For the history
 before the fork, see [Atoll's changelog](https://github.com/Ebullioscopic/Atoll/blob/dev/CHANGELOG.md).
 
+## [1.0.2]
+
+### Fixed
+- **Reminders in "Next".** Reminders are a macOS permission of their own, and Skerry never asked for it, so they were missing from "Next" with nothing to say why. While that permission is unanswered, "Next" now offers "Reminders too · Allow Access", and a click asks macOS. Reminders whose due date comes without a calendar are no longer dropped.
+- **Fewer permission prompts.** Skerry asks for the Downloads folder only when the download listener is on, not on every launch.
+
+### Changed
+- **Running the tests leaves your Mac alone.** The unit-test host is a second Skerry to macOS. It no longer asks for any permission, never shows its island, and never takes the keyboard. A source scan keeps new prompting calls behind the guard.
+- The README shows a screenshot batch and the shelf.
+
 ## [1.0.1]
 
 ### Fixed
