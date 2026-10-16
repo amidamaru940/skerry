@@ -58,6 +58,16 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
     private let MRMediaRemoteSetShuffleModeFunction: @convention(c) (Int) -> Void
     private let MRMediaRemoteSetRepeatModeFunction: @convention(c) (Int) -> Void
 
+    /// What the system reports, merged from the adapter's diffs. What is
+    /// shown is `playbackState`, which leaves a video without track details out.
+    private var rawState: PlaybackState = .init(bundleIdentifier: "com.apple.Music")
+    private var hold = MusicOnlyHold()
+    private var settleTask: Task<Void, Never>?
+
+    /// Whether a video holds the system's controls while the music stays on
+    /// screen. Every command would reach the video then, so none is sent.
+    private var controlsAreHeld: Bool { playbackState.controlsTakenBy != nil }
+
     private var process: Process?
     private var pipeHandler: JSONLinesPipeHandler?
     private var streamTask: Task<Void, Never>?
@@ -94,6 +104,7 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
 
     deinit {
         streamTask?.cancel()
+        settleTask?.cancel()
         
         if let pipeHandler = self.pipeHandler {
             Task { await pipeHandler.close()
@@ -113,26 +124,32 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
 
     // MARK: - Protocol Implementation
     func play() async {
+        guard !controlsAreHeld else { return }
         MRMediaRemoteSendCommandFunction(0, nil)
     }
 
     func pause() async {
+        guard !controlsAreHeld else { return }
         MRMediaRemoteSendCommandFunction(1, nil)
     }
 
     func togglePlay() async {
+        guard !controlsAreHeld else { return }
         MRMediaRemoteSendCommandFunction(2, nil)
     }
 
     func nextTrack() async {
+        guard !controlsAreHeld else { return }
         MRMediaRemoteSendCommandFunction(4, nil)
     }
 
     func previousTrack() async {
+        guard !controlsAreHeld else { return }
         MRMediaRemoteSendCommandFunction(5, nil)
     }
 
     func seek(to time: Double) async {
+        guard !controlsAreHeld else { return }
         MRMediaRemoteSetElapsedTimeFunction(time)
     }
 
@@ -217,22 +234,28 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
     }
     
     func toggleShuffle() async {
+        guard !controlsAreHeld else { return }
         // TIDAL never registered a shuffle command, so the Media Remote call
         // below reaches nothing: the button moved and the app carried on. Its
         // Playback menu is the one place that both reports and accepts it.
         if playbackState.bundleIdentifier == TidalAccessibility.bundleIdentifier {
             let current = await TidalAccessibility.isShuffled() ?? playbackState.isShuffled
             guard await TidalAccessibility.setShuffled(!current) else { return }
-            await MainActor.run { playbackState.isShuffled = !current }
+            await MainActor.run {
+                rawState.isShuffled = !current
+                playbackState.isShuffled = !current
+            }
             return
         }
 
         // MRMediaRemoteSendCommandFunction(6, nil)
         MRMediaRemoteSetShuffleModeFunction(playbackState.isShuffled ? 1 : 3)
         playbackState.isShuffled.toggle()
+        rawState.isShuffled = playbackState.isShuffled
     }
     
     func toggleRepeat() async {
+        guard !controlsAreHeld else { return }
         // Same as shuffle, and the menu is better than a cycling button: each
         // repeat item sets its own mode, so there is nothing to overshoot.
         if playbackState.bundleIdentifier == TidalAccessibility.bundleIdentifier {
@@ -244,13 +267,17 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
             case .one: next = .off
             }
             guard await TidalAccessibility.setRepeatMode(next) else { return }
-            await MainActor.run { playbackState.repeatMode = next }
+            await MainActor.run {
+                rawState.repeatMode = next
+                playbackState.repeatMode = next
+            }
             return
         }
 
         // MRMediaRemoteSendCommandFunction(7, nil)
         let newRepeatMode = (playbackState.repeatMode == .off) ? 3 : (playbackState.repeatMode.rawValue - 1)
         playbackState.repeatMode = RepeatMode(rawValue: newRepeatMode) ?? .off
+        rawState.repeatMode = playbackState.repeatMode
         MRMediaRemoteSetRepeatModeFunction(newRepeatMode)
     }
     
@@ -320,12 +347,12 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
         let payload = update.payload
         let diff = update.diff ?? false
 
-        var newPlaybackState = PlaybackState(bundleIdentifier: playbackState.bundleIdentifier)
+        var newPlaybackState = PlaybackState(bundleIdentifier: rawState.bundleIdentifier)
         
-        newPlaybackState.title = payload.title ?? (diff ? self.playbackState.title : "")
-        newPlaybackState.artist = payload.artist ?? (diff ? self.playbackState.artist : "")
-        newPlaybackState.album = payload.album ?? (diff ? self.playbackState.album : "")
-        newPlaybackState.duration = payload.resolvedDuration ?? (diff ? self.playbackState.duration : 0)
+        newPlaybackState.title = payload.title ?? (diff ? self.rawState.title : "")
+        newPlaybackState.artist = payload.artist ?? (diff ? self.rawState.artist : "")
+        newPlaybackState.album = payload.album ?? (diff ? self.rawState.album : "")
+        newPlaybackState.duration = payload.resolvedDuration ?? (diff ? self.rawState.duration : 0)
 
         // The reported position and the instant it was sampled are a matched pair:
         // elapsedTime is the position *at* timestamp. They have to be adopted or
@@ -341,8 +368,8 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
             newPlaybackState.currentTime = 0
             newPlaybackState.lastUpdated = payload.resolvedTimestamp ?? Date()
         } else if diff {
-            newPlaybackState.currentTime = self.playbackState.currentTime
-            newPlaybackState.lastUpdated = self.playbackState.lastUpdated
+            newPlaybackState.currentTime = self.rawState.currentTime
+            newPlaybackState.lastUpdated = self.rawState.lastUpdated
         } else {
             newPlaybackState.currentTime = 0
             newPlaybackState.lastUpdated = payload.resolvedTimestamp ?? Date()
@@ -365,7 +392,7 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
         // So the position is re-anchored on the transition itself: frozen where
         // it had got to when playback stops, and restarted from there when it
         // resumes.
-        let wasPlaying = self.playbackState.isPlaying
+        let wasPlaying = self.rawState.isPlaying
         let isPlayingNow = payload.playing ?? (diff ? wasPlaying : false)
 
         // Whether the sender sent a position is not the question -- whether it
@@ -397,10 +424,10 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
             }()
 
             if wasPlaying {
-                let elapsedWhilePlaying = transitionInstant.timeIntervalSince(self.playbackState.lastUpdated)
+                let elapsedWhilePlaying = transitionInstant.timeIntervalSince(self.rawState.lastUpdated)
                 newPlaybackState.currentTime = max(
                     0,
-                    self.playbackState.currentTime + (elapsedWhilePlaying * self.playbackState.playbackRate)
+                    self.rawState.currentTime + (elapsedWhilePlaying * self.rawState.playbackRate)
                 )
             } else {
                 // Resuming. The position is wherever it was left, and the
@@ -409,7 +436,7 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
                 // be stale, which for some senders is a repeated zero that
                 // would restart the track. A seek while paused publishes a
                 // fresh sample, so it never reaches this branch.
-                newPlaybackState.currentTime = max(0, self.playbackState.currentTime)
+                newPlaybackState.currentTime = max(0, self.rawState.currentTime)
             }
 
             newPlaybackState.lastUpdated = transitionInstant
@@ -421,14 +448,14 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
         } else if !diff {
             newPlaybackState.isShuffled = false
         } else {
-            newPlaybackState.isShuffled = self.playbackState.isShuffled
+            newPlaybackState.isShuffled = self.rawState.isShuffled
         }
         if let repeatModeValue = payload.repeatMode {
             newPlaybackState.repeatMode = RepeatMode(rawValue: repeatModeValue) ?? .off
         } else if !diff {
             newPlaybackState.repeatMode = .off
         } else {
-            newPlaybackState.repeatMode = self.playbackState.repeatMode
+            newPlaybackState.repeatMode = self.rawState.repeatMode
         }
 
         if let artworkDataString = payload.artworkData {
@@ -439,15 +466,33 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
             newPlaybackState.artwork = nil
         }
 
-        newPlaybackState.playbackRate = payload.playbackRate ?? (diff ? self.playbackState.playbackRate : 1.0)
-        newPlaybackState.isPlaying = payload.playing ?? (diff ? self.playbackState.isPlaying : false)
+        newPlaybackState.playbackRate = payload.playbackRate ?? (diff ? self.rawState.playbackRate : 1.0)
+        newPlaybackState.isPlaying = payload.playing ?? (diff ? self.rawState.isPlaying : false)
         newPlaybackState.bundleIdentifier = (
             payload.parentApplicationBundleIdentifier ??
             payload.bundleIdentifier ??
-            (diff ? self.playbackState.bundleIdentifier : "")
+            (diff ? self.rawState.bundleIdentifier : "")
         )
         
-        self.playbackState = newPlaybackState
+        self.rawState = newPlaybackState
+        publish(now: now)
+    }
+
+    /// Publishes what the system reports, minus a video without track details
+    /// (see `MusicOnlyHold`).
+    private func publish(now: Date) {
+        settleTask?.cancel()
+        settleTask = nil
+        playbackState = hold.admit(rawState, now: now)
+        guard let deadline = hold.settleDeadline else { return }
+        // Nothing more may arrive, so the report is looked at again once it
+        // has had its time.
+        let delay = max(0, deadline.timeIntervalSince(Date()))
+        settleTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(delay))
+            guard !Task.isCancelled, let self else { return }
+            self.publish(now: Date())
+        }
     }
 }
 

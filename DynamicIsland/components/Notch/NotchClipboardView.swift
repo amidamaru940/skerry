@@ -31,6 +31,10 @@ struct NotchClipboardView: View {
     @ObservedObject var clipboardManager = ClipboardManager.shared
     @Default(.clipboardHistoryPaused) private var paused
     @ObservedObject private var presentation = ScreenPresentation.shared
+    /// What the grid's scroll view shows and what its cards need, for the
+    /// island to shrink to the cards (see `BufferFit`).
+    @State private var scrollVisibleHeight: CGFloat = 0
+    @State private var scrollContentHeight: CGFloat = 0
     @State private var filter: ClipboardFilter = .all
     @State private var query = ""
     @State private var hoveredItemId: UUID?
@@ -107,7 +111,7 @@ struct NotchClipboardView: View {
             }
             if clipboardManager.clipboardHistory.isEmpty && clipboardManager.pinnedItems.isEmpty {
                 if !paused { emptyState }
-                Spacer(minLength: 0)
+                BufferSlackFiller()
             } else {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 8) {
@@ -135,7 +139,11 @@ struct NotchClipboardView: View {
                     }
                     .padding(.horizontal, embedded ? 0 : 20)
                     .padding(.bottom, 16)
+                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { scrollContentHeight = $0 }
                 }
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { scrollVisibleHeight = $0 }
+                // The island shrinks to the cards when they leave room below.
+                .preference(key: BufferSlackKey.self, value: scrollVisibleHeight - scrollContentHeight)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -259,9 +267,9 @@ struct NotchClipboardView: View {
         DSEmptyState(
             symbol: "doc.on.clipboard",
             title: String(localized: "No copies yet"),
-            message: String(localized: "Copy something to see it here")
+            message: String(localized: "Copy something to see it here"),
+            inline: true
         )
-        .padding(.vertical, 12)
     }
 
     /// One calm line instead of an empty screen that said "paused" and

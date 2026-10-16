@@ -90278,6 +90278,26 @@
           }
         }
       }
+    },
+    "Playback position" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Позиция воспроизведения"
+          }
+        }
+      }
+    },
+    "Controls are with a video in %@" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Управление у видео в %@"
+          }
+        }
+      }
     }
   },
   "version" : "1.2"

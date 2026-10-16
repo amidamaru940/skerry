@@ -25,6 +25,18 @@ import Combine
 import Defaults
 import Foundation
 import SwiftUI
+import os.log
+
+/// Where a track change came from, for "tracks switch by themselves":
+/// `log stream --level debug --predicate 'subsystem == "io.github.amidamaru940.skerry" && category == "playback"'`.
+/// Debug level, so nothing is kept on disk.
+enum PlaybackLog {
+    static let log = OSLog(subsystem: "io.github.amidamaru940.skerry", category: "playback")
+
+    static func note(_ message: String) {
+        os_log("%{public}@", log: log, type: .debug, message)
+    }
+}
 
 // swiftlint:disable file_length
 
@@ -630,6 +642,9 @@ class MusicManager: ObservableObject {
     /// identifier. Keeping this separate from `isLiveStream` lets the UI avoid
     /// reserving song-only space (notably lyrics) for that short media item.
     @Published private(set) var isAdvertisement: Bool = false
+    /// The app whose video holds the playback controls while the music stays
+    /// on screen (see `MusicOnlyHold`); nil when the controls reach the music.
+    @Published private(set) var controlsTakenBy: String?
     @ObservedObject var coordinator = DynamicIslandViewCoordinator.shared
     @Published var usingAppIconForArtwork: Bool = false
     @Published private(set) var skipGesturePulse: SkipGesturePulse?
@@ -926,6 +941,10 @@ class MusicManager: ObservableObject {
     @MainActor
     // swiftlint:disable:next cyclomatic_complexity function_body_length
     func updateFromPlaybackState(_ state: PlaybackState) {
+        if state.controlsTakenBy != controlsTakenBy {
+            controlsTakenBy = state.controlsTakenBy
+        }
+
         let advertisement = Self.isLikelyAdvertisement(state)
         let advertisementChanged = advertisement != isAdvertisement
         let advertisementStarted = advertisement && !isAdvertisement
@@ -1607,39 +1626,63 @@ class MusicManager: ObservableObject {
             && state.artwork == nil
     }
 
+    /// Shown in place of the artist while a video holds the controls:
+    /// "Controls are with a video in Chrome".
+    var controlsNote: String? {
+        guard let controlsTakenBy else { return nil }
+        return String(format: String(localized: "Controls are with a video in %@"), Self.appName(for: controlsTakenBy))
+    }
+
+    static func appName(for bundleIdentifier: String) -> String {
+        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier) else {
+            return bundleIdentifier
+        }
+        let name = FileManager.default.displayName(atPath: url.path)
+        return name.hasSuffix(".app") ? String(name.dropLast(4)) : name
+    }
+
+    /// Whether a command would reach the music. While a video holds the
+    /// controls it would reach the video instead, so none is sent.
+    private var controlsReachMusic: Bool { controlsTakenBy == nil }
+
     // MARK: - Public Methods for controlling playback
     func playPause() {
+        guard controlsReachMusic else { return }
         Task {
             await activeController?.togglePlay()
         }
     }
 
     func play() {
+        guard controlsReachMusic else { return }
         Task {
             await activeController?.play()
         }
     }
 
     func pause() {
+        guard controlsReachMusic else { return }
         Task {
             await activeController?.pause()
         }
     }
 
     func toggleShuffle() {
+        guard controlsReachMusic else { return }
         Task {
             await activeController?.toggleShuffle()
         }
     }
 
     func toggleRepeat() {
+        guard controlsReachMusic else { return }
         Task {
             await activeController?.toggleRepeat()
         }
     }
     
     func togglePlay() {
-        guard let controller = activeController else { return }
+        guard controlsReachMusic, let controller = activeController else { return }
         let targetState = !isPlaying
 
         Task {
@@ -1680,7 +1723,8 @@ class MusicManager: ObservableObject {
     }
 
     func nextTrack() {
-        guard let controller = activeController else { return }
+        guard controlsReachMusic, let controller = activeController else { return }
+        PlaybackLog.note("next track requested")
         Task {
             await MainActor.run {
                 beginManualTrackArtworkHandoff()
@@ -1690,7 +1734,8 @@ class MusicManager: ObservableObject {
     }
 
     func previousTrack() {
-        guard let controller = activeController else { return }
+        guard controlsReachMusic, let controller = activeController else { return }
+        PlaybackLog.note("previous track requested")
         Task {
             await MainActor.run {
                 beginManualTrackArtworkHandoff()
@@ -1700,13 +1745,14 @@ class MusicManager: ObservableObject {
     }
 
     func seek(to position: TimeInterval) {
+        guard controlsReachMusic else { return }
         Task {
             await activeController?.seek(to: position)
         }
     }
 
     func seek(by offset: TimeInterval) {
-        guard !isLiveStream else { return }
+        guard controlsReachMusic, !isLiveStream else { return }
         let duration = songDuration
         guard duration > 0 else { return }
 
@@ -1714,11 +1760,13 @@ class MusicManager: ObservableObject {
         let magnitude = abs(offset)
 
         if offset < 0, current <= magnitude {
+            PlaybackLog.note("seek back past the start")
             previousTrack()
             return
         }
 
         if offset > 0, (duration - current) <= magnitude {
+            PlaybackLog.note("seek forward past the end")
             nextTrack()
             return
         }
@@ -1729,10 +1777,11 @@ class MusicManager: ObservableObject {
 
     @MainActor
     func handleSkipGesture(direction: SkipDirection) {
-        guard Defaults[.enableHorizontalMusicGestures] else { return }
+        guard controlsReachMusic, Defaults[.enableHorizontalMusicGestures] else { return }
         guard !isPlayerIdle || bundleIdentifier != nil else { return }
 
         let behavior = Defaults[.musicGestureBehavior]
+        PlaybackLog.note("swipe \(direction == .forward ? "forward" : "backward")")
 
         switch behavior {
         case .track:

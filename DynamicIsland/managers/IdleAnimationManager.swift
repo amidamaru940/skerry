@@ -65,6 +65,7 @@ class IdleAnimationManager {
             print("✅ [IdleAnimationManager] First launch: Initialized with \(animations.count) animations")
         } else {
             // Subsequent launch - ensure all bundled animations are present
+            existing = Self.refreshingBuiltInSources(of: existing, from: animations)
             let existingNames = Set(existing.filter { $0.isBuiltIn }.map { $0.name })
             
             // Add any missing bundled animations
@@ -77,6 +78,12 @@ class IdleAnimationManager {
             
             Defaults[.customIdleAnimations] = existing
             
+            if let selected = Defaults[.selectedIdleAnimation],
+               let refreshed = Self.refreshingBuiltInSources(of: [selected], from: animations).first,
+               refreshed != selected {
+                Defaults[.selectedIdleAnimation] = refreshed
+            }
+
             // If current selection was the old built-in face (no longer valid), select first available
             if let selected = Defaults[.selectedIdleAnimation] {
                 let isValid: Bool
@@ -96,6 +103,28 @@ class IdleAnimationManager {
         }
     }
     
+    /// Points the stored built-in animations at their copies in this app.
+    ///
+    /// Their sources are saved as absolute URLs into the app bundle, so an app
+    /// that was moved or renamed kept pointing at a bundle that is gone and the
+    /// island drew nothing. Matched by name; the id stays, because each
+    /// animation's adjustments are stored under it.
+    static func refreshingBuiltInSources(
+        of stored: [CustomIdleAnimation],
+        from bundled: [CustomIdleAnimation]
+    ) -> [CustomIdleAnimation] {
+        let current = Dictionary(
+            bundled.filter(\.isBuiltIn).map { ($0.name, $0.source) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        return stored.map { animation in
+            guard animation.isBuiltIn, let source = current[animation.name] else { return animation }
+            var refreshed = animation
+            refreshed.source = source
+            return refreshed
+        }
+    }
+
     // MARK: - Bundled Animations
     
     /// Load animations from the LottieAnimations folder in the bundle

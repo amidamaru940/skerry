@@ -63,6 +63,9 @@ struct BufferTabView: View {
                 }
                 content
             }
+            .onPreferenceChange(BufferSlackKey.self) { slack in
+                MainActor.assumeIsolated { state.fit(slack: slack) }
+            }
             .padding(.horizontal, 12)
             .padding(.top, 2)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
@@ -193,11 +196,15 @@ struct BufferTabView: View {
         case .screenshots:
             screenshotsContent
         case .none:
-            DSEmptyState(
-                symbol: "doc.on.clipboard",
-                title: String(localized: "Clipboard is off"),
-                message: String(localized: "Turn on the clipboard or screenshot collecting in Settings.")
-            )
+            VStack(spacing: 0) {
+                DSEmptyState(
+                    symbol: "doc.on.clipboard",
+                    title: String(localized: "Clipboard is off"),
+                    message: String(localized: "Turn on the clipboard or screenshot collecting in Settings."),
+                    inline: true
+                )
+                BufferSlackFiller()
+            }
         default:
             NotchClipboardView(embedded: true)
         }
@@ -206,19 +213,28 @@ struct BufferTabView: View {
     @ViewBuilder
     private var screenshotsContent: some View {
         if !screenshots.canReadFolder {
-            DSEmptyState(
-                symbol: "lock",
-                title: String(localized: "No access to the screenshot folder"),
-                message: String(localized: "macOS keeps Skerry out of this folder. Choose ~/Screenshots in Screenshots settings, or allow access in System Settings.")
-            )
+            VStack(spacing: 0) {
+                DSEmptyState(
+                    symbol: "lock",
+                    title: String(localized: "No access to the screenshot folder"),
+                    message: String(localized: "macOS keeps Skerry out of this folder. Choose ~/Screenshots in Screenshots settings, or allow access in System Settings."),
+                    inline: true
+                )
+                BufferSlackFiller()
+            }
         } else if screenshots.store.isEmpty {
-            DSEmptyState(
-                symbol: "camera.viewfinder",
-                title: String(localized: "No screenshots yet"),
-                message: String(localized: "New screenshots (⇧⌘3, ⇧⌘4, ⇧⌘5) gather here in batches.")
-            )
+            VStack(spacing: 0) {
+                DSEmptyState(
+                    symbol: "camera.viewfinder",
+                    title: String(localized: "No screenshots yet"),
+                    message: String(localized: "New screenshots (⇧⌘3, ⇧⌘4, ⇧⌘5) gather here in batches."),
+                    inline: true
+                )
+                BufferSlackFiller()
+            }
         } else {
             ScreenshotBatchPanel(quickLook: quickLook)
+                .preference(key: BufferSlackKey.self, value: BufferFit.wantsAllRoom)
         }
     }
 }

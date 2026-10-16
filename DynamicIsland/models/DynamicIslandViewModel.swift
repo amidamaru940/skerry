@@ -212,6 +212,27 @@ class DynamicIslandViewModel: NSObject, ObservableObject {
             }
             .store(in: &cancellables)
 
+        BufferTabState.shared.$openHeight
+            .removeDuplicates()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                guard let self else { return }
+                guard self.notchState == .open, self.coordinator.currentView == .clipboard else { return }
+                let updatedTarget = self.calculateDynamicNotchSize()
+                guard self.notchSize != updatedTarget else { return }
+                withAnimation(DS.spring) {
+                    self.notchSize = updatedTarget
+                }
+                if let delegate = AppDelegate.shared {
+                    delegate.ensureWindowSize(
+                        addShadowPadding(to: updatedTarget),
+                        animated: true,
+                        force: false
+                    )
+                }
+            }
+            .store(in: &cancellables)
+
         coordinator.$notesLayoutState
             .removeDuplicates()
             .receive(on: RunLoop.main)
@@ -376,7 +397,8 @@ class DynamicIslandViewModel: NSObject, ObservableObject {
         }
 
         if let tallHeight = tabOpenHeight(for: coordinator.currentView) {
-            adjustedSize.height = max(adjustedSize.height, tallHeight)
+            // Clipboard is as tall as what it shows, shorter too.
+            adjustedSize.height = coordinator.currentView == .clipboard ? tallHeight : max(adjustedSize.height, tallHeight)
             return adjustedSize
         }
 

@@ -78,9 +78,10 @@ final class NotchTabLayoutTests: XCTestCase {
         XCTAssertNil(NotchTab(view: .extensionExperience))
     }
 
+    @MainActor
     func testGridTabsAreTallerAndTheTabCountUsesTheLayout() {
         XCTAssertEqual(tabOpenHeight(for: .screenshots), 320)
-        XCTAssertEqual(tabOpenHeight(for: .clipboard), 320)
+        XCTAssertEqual(tabOpenHeight(for: .clipboard), 320, "full height until its content is measured")
         XCTAssertNil(tabOpenHeight(for: .home))
         XCTAssertEqual(enabledStandardTabCount(), NotchTabLayout.visibleTabs.count)
     }

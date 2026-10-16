@@ -165,7 +165,16 @@ class ForkConfigurationTests(unittest.TestCase):
         self.assertIn('grep -rlaF "$HOME/" "$APP"', script)
         self.assertIn("STRIP_STYLE=debugging", script, "the debug map names the build folder")
         self.assertIn("ENABLE_CODE_COVERAGE=NO", script)
-        self.assertEqual((ROOT / "VERSION").read_text().strip(), "1.0.0")
+
+    def test_the_version_is_the_same_everywhere(self):
+        # make-release.sh names the DMG after VERSION; the app reports the
+        # project's MARKETING_VERSION; the changelog's top entry is the release.
+        version = (ROOT / "VERSION").read_text().strip()
+        self.assertRegex(version, r"^\d+\.\d+\.\d+$")
+        project = (ROOT / "DynamicIsland.xcodeproj" / "project.pbxproj").read_text()
+        self.assertEqual(set(re.findall(r"MARKETING_VERSION = ([^;]+);", project)), {version})
+        changelog = (ROOT / "CHANGELOG.md").read_text()
+        self.assertEqual(re.search(r"^## \[([^\]]+)\]", changelog, re.M).group(1), version)
 
 
     def test_sources_do_not_compile_their_paths_into_the_app(self):

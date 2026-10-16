@@ -11,7 +11,7 @@ body:
     attributes:
       label: Skerry version
       description: Settings → General → About, or the DMG you installed.
-      placeholder: "1.0.0"
+      placeholder: "1.0.1"
     validations:
       required: true
   - type: input

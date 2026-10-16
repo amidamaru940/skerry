@@ -568,8 +568,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             let preferredHeight = coordinator.notesLayoutState.preferredHeight
             baseSize.height = max(baseSize.height, preferredHeight)
         } else if let tallHeight = tabOpenHeight(for: coordinator.currentView) {
-            // Screenshots and Clipboard show a grid, Usage a refresh bar: taller.
-            baseSize.height = max(baseSize.height, tallHeight)
+            // Screenshots show a grid, Usage a refresh bar: taller. Clipboard
+            // is as tall as what it shows, shorter too.
+            baseSize.height = coordinator.currentView == .clipboard ? tallHeight : max(baseSize.height, tallHeight)
         } else if coordinator.currentView == .terminal {
             let screenHeight = NSScreen.main?.visibleFrame.height ?? 800
             let maxFraction = Defaults[.terminalMaxHeightFraction]
@@ -855,6 +856,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             .removeDuplicates()
             .sink { [weak self] _ in
                 self?.updateWindowSizeIfNeeded()
+            }
+            .store(in: &cancellables)
+
+        BufferTabState.shared.$openHeight
+            .removeDuplicates()
+            .sink { [weak self] _ in
+                // @Published emits before assignment.
+                DispatchQueue.main.async {
+                    self?.updateWindowSizeIfNeeded()
+                }
             }
             .store(in: &cancellables)
         

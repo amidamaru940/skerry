@@ -207,8 +207,10 @@ struct ContentView: View {
         }
 
         if let tallHeight = tabOpenHeight(for: coordinator.currentView) {
-            // Screenshots and Clipboard show a grid, Usage a refresh bar: taller.
-            return CGSize(width: baseSize.width, height: max(baseSize.height, tallHeight))
+            // Screenshots show a grid, Usage a refresh bar: taller. Clipboard
+            // is as tall as what it shows, shorter too.
+            let height = coordinator.currentView == .clipboard ? tallHeight : max(baseSize.height, tallHeight)
+            return CGSize(width: baseSize.width, height: height)
         }
 
         if coordinator.currentView == .terminal {

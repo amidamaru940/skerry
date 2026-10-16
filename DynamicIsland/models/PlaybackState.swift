@@ -45,6 +45,10 @@ struct PlaybackState {
     var lastUpdated: Date = Date.distantPast
     var artwork: Data?
     var liveArtworkURL: URL?
+    /// The app whose video holds the system's playback controls while this
+    /// track is kept on screen; nil when the controls reach this track. See
+    /// `MusicOnlyHold`.
+    var controlsTakenBy: String?
 }
 
 extension PlaybackState: Equatable {
@@ -63,5 +67,6 @@ extension PlaybackState: Equatable {
             && lhs.repeatMode == rhs.repeatMode
             && lhs.artwork == rhs.artwork
             && lhs.liveArtworkURL == rhs.liveArtworkURL
+            && lhs.controlsTakenBy == rhs.controlsTakenBy
     }
 }

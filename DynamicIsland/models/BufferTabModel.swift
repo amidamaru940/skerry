@@ -18,6 +18,7 @@
 
 import Combine
 import Foundation
+import SwiftUI
 
 /// The segments of the Clipboard tab, which now holds the screenshots too
 /// (docs/PLAN-DESIGN.md §3.4): everything, the screenshot batches, text,
@@ -86,10 +87,70 @@ enum BufferLayout {
     }
 }
 
+/// How tall the open island is on the Clipboard tab: as tall as what it
+/// shows. It always opened at the full grid height, so an empty clipboard was
+/// a large black square around one line. Between the compact Now height and
+/// the full grid height; past that the grid scrolls.
+enum BufferFit {
+    static let minimum: CGFloat = compactHomeOpenHeight
+    static let maximum: CGFloat = gridTabOpenHeight
+    /// Reported by content that wants all the room there is (the screenshot
+    /// grid).
+    static let wantsAllRoom: CGFloat = -10_000
+
+    /// The height that leaves no empty space under the content. `slack` is
+    /// the room left over below it at the `current` height, negative when the
+    /// content scrolls; nil when nothing was measured.
+    static func height(current: CGFloat, slack: CGFloat?) -> CGFloat {
+        guard let slack else { return maximum }
+        return min(max((current - slack).rounded(), minimum), maximum)
+    }
+
+    /// Small differences are measuring noise, not a reason to move the island.
+    static func isWorthChanging(from old: CGFloat, to new: CGFloat) -> Bool {
+        abs(new - old) >= 2
+    }
+}
+
+/// The room left over under the Clipboard tab's content (see `BufferFit`).
+struct BufferSlackKey: PreferenceKey {
+    static let defaultValue: CGFloat? = nil
+    static func reduce(value: inout CGFloat?, nextValue: () -> CGFloat?) {
+        value = value ?? nextValue()
+    }
+}
+
+/// Fills the space under content that does not scroll, and reports it.
+struct BufferSlackFiller: View {
+    var body: some View {
+        GeometryReader { geo in
+            Color.clear.preference(key: BufferSlackKey.self, value: geo.size.height)
+        }
+    }
+}
+
 /// The segment the Clipboard tab was left on, kept while the app runs.
 @MainActor
 final class BufferTabState: ObservableObject {
     static let shared = BufferTabState()
+    /// The open island's height on this tab (see `BufferFit`).
+    @Published private(set) var openHeight: CGFloat = BufferFit.maximum
+    private var fitWork: DispatchWorkItem?
+
+    /// Takes the room left under the content and resizes the island to fit,
+    /// once the layout has settled: the island's own resize re-measures it.
+    func fit(slack: CGFloat?) {
+        fitWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            let fitted = BufferFit.height(current: self.openHeight, slack: slack)
+            if BufferFit.isWorthChanging(from: self.openHeight, to: fitted) {
+                self.openHeight = fitted
+            }
+        }
+        fitWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: work)
+    }
     @Published var segment: BufferSegment = .all
     @Published var query = ""
     /// Pinned entries sit in one folded row on top until opened.

@@ -107,10 +107,13 @@ let gridTabOpenHeight: CGFloat = 320
 /// the cards keep the room they had.
 let usageTabOpenHeight: CGFloat = 224
 
-/// The open height of the tabs that need more than the standard one.
+/// The open height of the tabs that need more than the standard one. The
+/// Clipboard tab is as tall as what it shows (see `BufferFit`).
+@MainActor
 func tabOpenHeight(for view: NotchViews) -> CGFloat? {
     switch view {
-    case .screenshots, .clipboard: return gridTabOpenHeight
+    case .screenshots: return gridTabOpenHeight
+    case .clipboard: return BufferTabState.shared.openHeight
     case .llmUsage: return usageTabOpenHeight
     default: return nil
     }

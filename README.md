@@ -33,7 +33,7 @@
 - History lives in memory only, unless you turn on saving to disk.
 - Entries expire after 24 hours, and one-time codes after 2 minutes.
 
-**Now playing, calm.** Artwork, title and the transport controls are always there. Shuffle, repeat, volume, output and lyrics appear while the pointer is over the player. **Next** shows your upcoming events beside it. **Auto** picks between Spotify, Music and anything playing in a browser. Swipe the closed notch to change tracks.
+**Now playing, calm.** Artwork, title and the transport controls are always there. Shuffle, repeat, volume, output and lyrics appear while the pointer is over the player. **Next** shows your upcoming events beside it. **Auto** picks between Spotify, Music and anything playing in a browser, and a video without track details, such as Reels in another tab, never takes the player over. Swipe the closed notch to change tracks.
 
 **Small things done right.**
 - **Keep Awake** with a timer.

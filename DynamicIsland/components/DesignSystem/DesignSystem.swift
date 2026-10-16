@@ -78,6 +78,9 @@ enum DS {
     /// Moves without overshoot; hover changes are quicker still.
     static let spring = Animation.spring(response: 0.32, dampingFraction: 1)
     static let hover = Animation.easeOut(duration: 0.15)
+    /// Controls that are there but cannot act just now, such as the player's
+    /// while a video holds the system's playback controls.
+    static let heldControlsOpacity: Double = 0.35
 }
 
 extension Color {
@@ -265,8 +268,39 @@ struct DSEmptyState: View {
     var message: String? = nil
     var actionTitle: String? = nil
     var action: (() -> Void)? = nil
+    /// One line at the top instead of a centred block that fills the space:
+    /// for places that shrink to their content.
+    var inline = false
 
     var body: some View {
+        if inline {
+            inlineBody
+        } else {
+            stackedBody
+        }
+    }
+
+    private var inlineBody: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Image(systemName: symbol)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(DS.Palette.textTertiary)
+            (Text(title).font(DS.Typeface.bodyEmphasis).foregroundColor(DS.Palette.text)
+                + Text(message.map { "  " + $0 } ?? "").font(.system(size: 12)).foregroundColor(DS.Palette.textSecondary))
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+            if let actionTitle, let action {
+                Spacer(minLength: 8)
+                Button(actionTitle, action: action)
+                    .buttonStyle(DSButtonStyle(kind: .secondary, height: 24))
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 4)
+        .padding(.vertical, 8)
+    }
+
+    private var stackedBody: some View {
         VStack(spacing: 8) {
             Image(systemName: symbol)
                 .font(.system(size: 22, weight: .medium))

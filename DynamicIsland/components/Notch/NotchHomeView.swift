@@ -508,7 +508,10 @@ struct MusicControlsView: View {
                 badgeHeight: 14
             )
             MarqueeText(
-                $musicManager.artistName,
+                Binding(
+                    get: { musicManager.controlsNote ?? musicManager.artistName },
+                    set: { _ in }
+                ),
                 font: .headline,
                 nsFont: .headline,
                 textColor: Defaults[.playerColorTinting] ? Color(nsColor: musicManager.avgColor)
@@ -589,6 +592,9 @@ struct MusicControlsView: View {
             .padding(.top, 5)
             .frame(height: 36)
         }
+        // A seek would reach the video that holds the controls.
+        .allowsHitTesting(musicManager.controlsTakenBy == nil)
+        .opacity(musicManager.controlsTakenBy == nil ? 1 : DS.heldControlsOpacity)
     }
 
     /// ⏮ ⏯ ⏭ always; shuffle, repeat, volume, output and lyrics on either
@@ -619,6 +625,8 @@ struct MusicControlsView: View {
                     slotView(for: slot)
                 }
             }
+            .disabled(musicManager.controlsTakenBy != nil)
+            .opacity(musicManager.controlsTakenBy == nil ? 1 : DS.heldControlsOpacity)
             .layoutPriority(1)
 
             HStack(spacing: 2) {

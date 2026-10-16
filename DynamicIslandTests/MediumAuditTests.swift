@@ -134,6 +134,7 @@ final class MediumAuditTests: XCTestCase {
         guard case .notFound = manager.results[.codex] else { return XCTFail("Codex is not on this Mac") }
     }
 
+    @MainActor
     func testTheRefreshBarSaysWhenItLastUpdated() {
         let now = Date(timeIntervalSince1970: 1_800_000_000)
         XCTAssertNil(UsageRefreshBar.updatedText(lastUpdated: nil, now: now), "nothing to say before the first refresh")

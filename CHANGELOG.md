@@ -5,6 +5,21 @@ All notable changes to Skerry are documented here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). For the history
 before the fork, see [Atoll's changelog](https://github.com/Ebullioscopic/Atoll/blob/dev/CHANGELOG.md).
 
+## [1.0.1]
+
+### Fixed
+- **Seeking in the compact player.** The progress line under the title was only drawn, so music could not be wound in the one-row player. A click or a drag now seeks, and the time shows while you drag.
+- **Videos no longer take the player over.** A browser hands macOS one tab at a time, so a video without track details, such as Instagram Reels, replaced the music playing in another tab, and the controls reached the video. The music now stays on screen. Its controls rest, with "Controls are with a video in Chrome", until the browser hands them back when the video is closed.
+- **Idle animations after moving the app.** The built-in animations were stored with the app's path and disappeared once the app was moved or renamed.
+- **Track changes without a gap.** A browser reports a track change in steps: about a second of nothing, then the title, then the rest, then the artwork. The player disappeared and redrew itself for each. The previous track now stays until the next one has arrived, and that one appears complete.
+- **Tracks no longer switch by themselves.** The swipe that changes tracks added up scrolling that was never a swipe: sideways drift while scrolling a page near the top of the screen, gestures that ended off the island, and mouse-wheel nudges minutes apart.
+
+### Changed
+- **The Clipboard tab is as tall as what it shows.** An empty clipboard is a thin strip with one line instead of a large square, and the island grows with the copies up to the full grid.
+
+### Added
+- Issue and pull request templates, and a security policy.
+
 ## [1.0.0]
 
 First release of Skerry, forked from Atoll at `868c25d`.

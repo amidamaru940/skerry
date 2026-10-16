@@ -21,9 +21,9 @@ import Defaults
 import SwiftUI
 
 /// The player in one row, for the compact island (docs/PLAN-DESIGN.md
-/// §3.10): artwork, title and artist over a thin progress line, ⏮ ⏯ ⏭,
-/// the volume button while the pointer is over the row, and the next two
-/// events at the end of the row.
+/// §3.10): artwork, title and artist over a thin progress line you can
+/// click or drag to seek, ⏮ ⏯ ⏭, the volume button while the pointer is
+/// over the row, and the next two events at the end of the row.
 struct CompactPlayerRow: View {
     /// Whether "Next" closes the row (the calendar is on).
     var showsNext = false
@@ -43,6 +43,9 @@ struct CompactPlayerRow: View {
                     duration: musicManager.songDuration
                 ),
                 isPlaying: musicManager.isPlaying,
+                duration: musicManager.songDuration,
+                onSeek: musicManager.isLiveStream ? nil : { MusicManager.shared.seek(to: $0) },
+                controlsNote: musicManager.controlsNote,
                 onPrevious: { musicManager.previousTrack() },
                 onPlayPause: { MusicManager.shared.togglePlay() },
                 onNext: { musicManager.nextTrack() },
@@ -67,6 +70,15 @@ struct CompactPlayerRowContent: View {
     /// 0…1, nil when unknown (a live stream).
     let progress: Double?
     let isPlaying: Bool
+    /// The track's length in seconds, for seeking and the time shown while
+    /// the line is dragged.
+    var duration: TimeInterval = 0
+    /// Seeks to a position in seconds; nil leaves the line for show only.
+    /// The one-row player used to have no way to seek at all.
+    var onSeek: ((TimeInterval) -> Void)? = nil
+    /// Set while a video holds the playback controls: shown in place of the
+    /// artist, with ⏮ ⏯ ⏭ and the line on hold (see `MusicOnlyHold`).
+    var controlsNote: String? = nil
     var onPrevious: () -> Void = {}
     var onPlayPause: () -> Void = {}
     var onNext: () -> Void = {}
@@ -83,6 +95,9 @@ struct CompactPlayerRowContent: View {
 
     /// Room for "Next": a time, "Tomorrow" and a short title.
     static let nextWidth: CGFloat = 210
+
+    /// Where the line is being dragged to, 0…1; nil when it is not.
+    @State private var scrubbing: Double?
 
     /// As in the full player: the extras show only while the pointer is over
     /// the player or their popover is open, so the row is calm otherwise.
@@ -112,24 +127,30 @@ struct CompactPlayerRowContent: View {
                     .font(DS.Typeface.bodyEmphasis)
                     .foregroundStyle(DS.Palette.text)
                     .lineLimit(1)
-                if !artist.isEmpty {
+                if let scrubbing, let time = CompactSeek.timeLabel(fraction: scrubbing, duration: duration) {
+                    // The artist makes way for the time while the line is dragged.
+                    Text(time)
+                        .font(.system(size: 12).monospacedDigit())
+                        .foregroundStyle(DS.Palette.textSecondary)
+                        .lineLimit(1)
+                } else if let controlsNote {
+                    Text(controlsNote)
+                        .font(.system(size: 12))
+                        .foregroundStyle(DS.Palette.textSecondary)
+                        .lineLimit(1)
+                } else if !artist.isEmpty {
                     Text(artist)
                         .font(.system(size: 12))
                         .foregroundStyle(DS.Palette.textSecondary)
                         .lineLimit(1)
                 }
                 if let progress {
-                    Capsule()
-                        .fill(DS.Palette.raised)
-                        .frame(height: 3)
-                        .overlay(alignment: .leading) {
-                            GeometryReader { geo in
-                                Capsule()
-                                    .fill(DS.Palette.text)
-                                    .frame(width: geo.size.width * progress, height: 3)
-                            }
-                        }
-                        .padding(.top, 3)
+                    CompactSeekBar(
+                        progress: progress,
+                        duration: duration,
+                        onSeek: controlsNote == nil ? onSeek : nil,
+                        scrubbing: $scrubbing
+                    )
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -142,17 +163,22 @@ struct CompactPlayerRowContent: View {
                         .allowsHitTesting(showsExtras)
                         .animation(DS.hover, value: showsExtras)
                 }
-                DSIconButton(symbol: "backward.fill", label: String(localized: "Previous Track"), action: onPrevious)
-                Button(action: onPlayPause) {
-                    Image(systemName: isPlaying ? "pause.fill" : "play.fill")
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(Color.black)
-                        .frame(width: 34, height: 34)
-                        .background(Circle().fill(DS.Palette.text))
+                HStack(spacing: 4) {
+                    DSIconButton(symbol: "backward.fill", label: String(localized: "Previous Track"), action: onPrevious)
+                    Button(action: onPlayPause) {
+                        Image(systemName: isPlaying ? "pause.fill" : "play.fill")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(Color.black)
+                            .frame(width: 34, height: 34)
+                            .background(Circle().fill(DS.Palette.text))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(Text(isPlaying ? "Pause" : "Play"))
+                    DSIconButton(symbol: "forward.fill", label: String(localized: "Next Track"), action: onNext)
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel(Text(isPlaying ? "Pause" : "Play"))
-                DSIconButton(symbol: "forward.fill", label: String(localized: "Next Track"), action: onNext)
+                .disabled(controlsNote != nil)
+                .opacity(controlsNote == nil ? 1 : DS.heldControlsOpacity)
+                .animation(DS.hover, value: controlsNote == nil)
             }
 
             if let next {
@@ -164,5 +190,122 @@ struct CompactPlayerRowContent: View {
             }
         }
         .frame(height: 56)
+    }
+}
+
+/// The arithmetic of the compact player's seek line, kept apart from the
+/// view so it can be tested.
+enum CompactSeek {
+    /// How long the line keeps showing where it was dropped while the player
+    /// catches up. Players report the new position a moment after a seek, and
+    /// without the hold the line jumped back and then forward again.
+    static let holdLimit: TimeInterval = 2.5
+    /// Close enough to the dropped point to count as arrived.
+    static let arrivalTolerance = 0.02
+
+    /// The share of the track under the pointer.
+    static func fraction(atX x: CGFloat, width: CGFloat) -> Double {
+        guard width > 0 else { return 0 }
+        return min(max(Double(x / width), 0), 1)
+    }
+
+    /// The position to seek to, in seconds; nil when the track has no length
+    /// a seek could land in (a live stream, or a sentinel from the sender).
+    static func position(fraction: Double, duration: TimeInterval) -> TimeInterval? {
+        guard duration.isFinite, duration > 0, duration <= 24 * 60 * 60 else { return nil }
+        return min(max(fraction, 0), 1) * duration
+    }
+
+    /// Whether the line can stop holding the dropped point: the player has
+    /// got there, or has had long enough to.
+    static func holdIsOver(reported: Double, dropped: Double, droppedAt: Date, now: Date) -> Bool {
+        abs(reported - dropped) <= arrivalTolerance || now.timeIntervalSince(droppedAt) >= holdLimit
+    }
+
+    /// "1:23 / 5:59", shown in place of the artist while dragging.
+    static func timeLabel(fraction: Double, duration: TimeInterval) -> String? {
+        guard let position = position(fraction: fraction, duration: duration) else { return nil }
+        return "\(clock(position)) / \(clock(duration))"
+    }
+
+    static func clock(_ seconds: TimeInterval) -> String {
+        let total = Int(seconds.rounded(.down))
+        let (hours, minutes, secs) = (total / 3600, (total % 3600) / 60, total % 60)
+        return hours > 0
+            ? String(format: "%d:%02d:%02d", hours, minutes, secs)
+            : String(format: "%d:%02d", minutes, secs)
+    }
+}
+
+/// The thin progress line under the title. It thickens under the pointer;
+/// a click or a drag seeks.
+private struct CompactSeekBar: View {
+    let progress: Double
+    let duration: TimeInterval
+    let onSeek: ((TimeInterval) -> Void)?
+    @Binding var scrubbing: Double?
+
+    @State private var isHovering = false
+    /// Where the line was dropped and when, held until the player catches up.
+    @State private var dropped: (fraction: Double, at: Date)?
+
+    private var canSeek: Bool {
+        onSeek != nil && CompactSeek.position(fraction: 0, duration: duration) != nil
+    }
+
+    private var shown: Double {
+        if let scrubbing { return scrubbing }
+        if let dropped { return dropped.fraction }
+        return progress
+    }
+
+    var body: some View {
+        GeometryReader { geo in
+            let thickness: CGFloat = canSeek && (isHovering || scrubbing != nil) ? 5 : 3
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(DS.Palette.raised)
+                Capsule()
+                    .fill(DS.Palette.text)
+                    .frame(width: geo.size.width * shown)
+            }
+            .frame(height: thickness)
+            .frame(maxHeight: .infinity)
+            .contentShape(Rectangle())
+            .highPriorityGesture(seekGesture(width: geo.size.width), including: canSeek ? .all : .subviews)
+            .animation(DS.hover, value: thickness)
+        }
+        // Taller than the line, so it is easy to catch.
+        .frame(height: 11)
+        .onHover { isHovering = $0 }
+        .onChange(of: progress) { _, reported in
+            guard let held = dropped else { return }
+            if CompactSeek.holdIsOver(reported: reported, dropped: held.fraction, droppedAt: held.at, now: Date()) {
+                dropped = nil
+            }
+        }
+        .accessibilityElement()
+        .accessibilityLabel(Text("Playback position"))
+        .accessibilityValue(Text(CompactSeek.timeLabel(fraction: shown, duration: duration) ?? ""))
+    }
+
+    private func seekGesture(width: CGFloat) -> some Gesture {
+        DragGesture(minimumDistance: 0)
+            .onChanged { gesture in
+                scrubbing = CompactSeek.fraction(atX: gesture.location.x, width: width)
+            }
+            .onEnded { gesture in
+                let fraction = CompactSeek.fraction(atX: gesture.location.x, width: width)
+                scrubbing = nil
+                guard let onSeek, let position = CompactSeek.position(fraction: fraction, duration: duration) else { return }
+                let droppedAt = Date()
+                dropped = (fraction, droppedAt)
+                onSeek(position)
+                // A paused player that never reports back must not leave the
+                // line stuck where it was dropped.
+                DispatchQueue.main.asyncAfter(deadline: .now() + CompactSeek.holdLimit) {
+                    if dropped?.at == droppedAt { dropped = nil }
+                }
+            }
     }
 }
