@@ -1131,6 +1131,9 @@ struct MusicSliderView: View {
     /// sliders do. Opt-in: the notch's own slider is meant to carry the album
     /// colour at rest.
     var desaturatesWhenIdle: Bool = false
+    /// The height that takes clicks around the track (see CustomSlider);
+    /// 0 keeps the slider as tall as its track.
+    var hitHeight: CGFloat = MusicSliderView.seekHitHeight
 
     enum TimeLabelLayout {
         case stacked
@@ -1188,7 +1191,8 @@ struct MusicSliderView: View {
     }
 
     private var stackedContent: some View {
-        VStack(spacing: 6) {
+        // The slider's taller hit area already spaces the times.
+        VStack(spacing: max(0, 6 - (sliderFrameHeight - max(restingTrackHeight, draggingTrackHeight)))) {
             sliderCore
                 .frame(height: sliderFrameHeight)
 
@@ -1255,7 +1259,8 @@ struct MusicSliderView: View {
                 onValueChange: onValueChange,
                 restingTrackHeight: restingTrackHeight,
                 draggingTrackHeight: draggingTrackHeight,
-                desaturatesWhenIdle: desaturatesWhenIdle
+                desaturatesWhenIdle: desaturatesWhenIdle,
+                hitHeight: hitHeight
             )
         } else {
             // Non-interactive fallback matching CustomSlider's idle appearance:
@@ -1353,8 +1358,11 @@ struct MusicSliderView: View {
         .system(size: 11, weight: .medium, design: .default).monospacedDigit()
     }
 
+    /// Clicks land within this height around the track (see CustomSlider).
+    static let seekHitHeight: CGFloat = 20
+
     private var sliderFrameHeight: CGFloat {
-        max(restingTrackHeight, draggingTrackHeight)
+        CustomSlider.frameHeight(resting: restingTrackHeight, dragging: draggingTrackHeight, hit: hitHeight)
     }
 
     func timeString(from seconds: Double) -> String {
@@ -1391,6 +1399,9 @@ struct CustomSlider: View {
     var draggingTrackHeight: CGFloat = 14
     /// See `MusicSliderView.desaturatesWhenIdle`.
     var desaturatesWhenIdle: Bool = false
+    /// The height that takes clicks, taller than the track: a thin track was
+    /// only caught by a click right on it.
+    var hitHeight: CGFloat = 0
     
     @State private var isHovering: Bool = false
     @Default(.enableRealTimeWaveform) var enableRealTimeWaveform
@@ -1410,7 +1421,9 @@ struct CustomSlider: View {
     var body: some View {
         GeometryReader { geometry in
             let width = geometry.size.width
-            let trackHeight = CGFloat(dragging ? draggingTrackHeight : restingTrackHeight)
+            // Thicker under the pointer, not only while dragging, so the track
+            // shows it can be moved before it is grabbed.
+            let trackHeight = Self.trackHeight(engaged: isEngaged, resting: restingTrackHeight, dragging: draggingTrackHeight)
             let rangeSpan = range.upperBound - range.lowerBound
 
             let progress = rangeSpan == .zero ? 0 : (value - range.lowerBound) / rangeSpan
@@ -1453,7 +1466,7 @@ struct CustomSlider: View {
             // The waveform scrubber is the exception: it is 3.5x the track and
             // is drawn to rise out of the bar, so it stays bottom-anchored.
             .frame(
-                height: max(restingTrackHeight, draggingTrackHeight),
+                height: Self.frameHeight(resting: restingTrackHeight, dragging: draggingTrackHeight, hit: hitHeight),
                 alignment: showScrubber ? .bottom : .center
             )
             .contentShape(Rectangle())
@@ -1479,12 +1492,21 @@ struct CustomSlider: View {
             .animation(.easeOut(duration: 0.2), value: trackSaturation)
             .animation(.easeOut(duration: 0.2), value: trackOpacity)
             .animation(.bouncy.speed(1.4), value: dragging)
+            .animation(DS.hover, value: isHovering)
             .onHover { hovering in
                 withAnimation(.easeInOut(duration: 0.2)) {
                     isHovering = hovering
                 }
             }
         }
+    }
+
+    static func trackHeight(engaged: Bool, resting: CGFloat, dragging: CGFloat) -> CGFloat {
+        engaged ? dragging : resting
+    }
+
+    static func frameHeight(resting: CGFloat, dragging: CGFloat, hit: CGFloat) -> CGFloat {
+        max(resting, dragging, hit)
     }
 }
 
@@ -1524,6 +1546,8 @@ struct PlayerVolumeButton: View {
 
 /// Volume, output device and "Open player".
 private struct PlayerVolumeRow: View {
+    /// The volume track took clicks only within its 6 points.
+    static let hitHeight: CGFloat = 24
     var showsOutput = true
     @StateObject private var volumeModel = MediaOutputVolumeViewModel()
     @State private var dragging = false
@@ -1554,10 +1578,11 @@ private struct PlayerVolumeRow: View {
                 lastDragged: $lastDragged,
                 onValueChange: { volumeModel.setVolume(Float($0)) },
                 thumbSize: 9,
-                restingTrackHeight: 3,
-                draggingTrackHeight: 6
+                restingTrackHeight: 4,
+                draggingTrackHeight: 7,
+                hitHeight: PlayerVolumeRow.hitHeight
             )
-            .frame(height: 6)
+            .frame(height: PlayerVolumeRow.hitHeight)
             .accessibilityLabel(Text("Volume"))
 
             if showsOutput {

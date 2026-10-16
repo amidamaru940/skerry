@@ -5,6 +5,11 @@ All notable changes to Skerry are documented here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). For the history
 before the fork, see [Atoll's changelog](https://github.com/Ebullioscopic/Atoll/blob/dev/CHANGELOG.md).
 
+## [1.0.3]
+
+### Changed
+- **Sliders are easy to catch.** Seeking and the volume needed a click right on a thin line. The volume now takes clicks within 24 points (it was 6), the player's seek bar within 20 (14) and the compact one within 18 (11), and each thickens as soon as the pointer is over it, not only while dragged. The player is no taller than before.
+
 ## [1.0.2]
 
 ### Fixed

@@ -122,7 +122,7 @@ struct CompactPlayerRowContent: View {
             .buttonStyle(.plain)
             .help(String(localized: "Open player"))
 
-            VStack(alignment: .leading, spacing: 3) {
+            VStack(alignment: .leading, spacing: 2) {
                 Text(title)
                     .font(DS.Typeface.bodyEmphasis)
                     .foregroundStyle(DS.Palette.text)
@@ -202,6 +202,13 @@ enum CompactSeek {
     static let holdLimit: TimeInterval = 2.5
     /// Close enough to the dropped point to count as arrived.
     static let arrivalTolerance = 0.02
+    /// The line is 3 points, but takes clicks within this height: a click
+    /// had to land right on it.
+    static let hitHeight: CGFloat = 18
+    static let restingThickness: CGFloat = 3
+    /// Under the pointer the line thickens, so it reads as something to
+    /// drag before it is grabbed.
+    static let engagedThickness: CGFloat = 6
 
     /// The share of the track under the pointer.
     static func fraction(atX x: CGFloat, width: CGFloat) -> Double {
@@ -259,9 +266,11 @@ private struct CompactSeekBar: View {
         return progress
     }
 
+    private var engaged: Bool { canSeek && (isHovering || scrubbing != nil) }
+
     var body: some View {
         GeometryReader { geo in
-            let thickness: CGFloat = canSeek && (isHovering || scrubbing != nil) ? 5 : 3
+            let thickness = engaged ? CompactSeek.engagedThickness : CompactSeek.restingThickness
             ZStack(alignment: .leading) {
                 Capsule()
                     .fill(DS.Palette.raised)
@@ -270,13 +279,12 @@ private struct CompactSeekBar: View {
                     .frame(width: geo.size.width * shown)
             }
             .frame(height: thickness)
-            .frame(maxHeight: .infinity)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
             .contentShape(Rectangle())
             .highPriorityGesture(seekGesture(width: geo.size.width), including: canSeek ? .all : .subviews)
-            .animation(DS.hover, value: thickness)
+            .animation(DS.hover, value: engaged)
         }
-        // Taller than the line, so it is easy to catch.
-        .frame(height: 11)
+        .frame(height: CompactSeek.hitHeight)
         .onHover { isHovering = $0 }
         .onChange(of: progress) { _, reported in
             guard let held = dropped else { return }

@@ -941,7 +941,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.6;
-				MARKETING_VERSION = 1.0.2;
+				MARKETING_VERSION = 1.0.3;
 				PRODUCT_BUNDLE_IDENTIFIER = io.github.amidamaru940.skerry.dev;
 				PRODUCT_MODULE_NAME = Atoll;
 				PRODUCT_NAME = "Skerry";
@@ -1017,7 +1017,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 14.6;
-				MARKETING_VERSION = 1.0.2;
+				MARKETING_VERSION = 1.0.3;
 				PRODUCT_BUNDLE_IDENTIFIER = io.github.amidamaru940.skerry;
 				PRODUCT_MODULE_NAME = Atoll;
 				PRODUCT_NAME = "Skerry";

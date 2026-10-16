@@ -74,4 +74,32 @@ final class CompactSeekTests: XCTestCase {
         host.layoutSubtreeIfNeeded()
         XCTAssertGreaterThan(host.fittingSize.height, 0)
     }
+
+    // MARK: Easy to catch
+
+    /// Seeking and the volume needed a click right on a thin line, and
+    /// nothing showed they could be dragged.
+    func testTheLinesTakeClicksWellAroundThemAndGrowUnderThePointer() {
+        XCTAssertGreaterThanOrEqual(CompactSeek.hitHeight, 16)
+        XCTAssertGreaterThan(CompactSeek.engagedThickness, CompactSeek.restingThickness)
+        XCTAssertGreaterThanOrEqual(MusicSliderView.seekHitHeight, 20)
+        XCTAssertEqual(CustomSlider.frameHeight(resting: 4, dragging: 7, hit: 24), 24, "the volume track takes clicks within 24 points")
+        XCTAssertEqual(CustomSlider.trackHeight(engaged: true, resting: 4, dragging: 7), 7, "it thickens under the pointer, not only while dragged")
+        XCTAssertEqual(CustomSlider.trackHeight(engaged: false, resting: 4, dragging: 7), 4)
+    }
+
+    @MainActor
+    func testTheTallerSeekLineStillFitsTheOneRowPlayer() {
+        let row = CompactPlayerRowContent(
+            artwork: NSImage(systemSymbolName: "music.note", accessibilityDescription: nil)!,
+            title: "Song",
+            artist: "Artist",
+            progress: 0.4,
+            isPlaying: true,
+            duration: 200,
+            onSeek: { _ in }
+        )
+        let host = NSHostingView(rootView: row.frame(width: 640))
+        XCTAssertLessThanOrEqual(host.fittingSize.height, 56)
+    }
 }

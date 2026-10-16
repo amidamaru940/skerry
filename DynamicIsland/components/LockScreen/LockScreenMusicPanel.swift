@@ -743,7 +743,8 @@ struct LockScreenMusicPanel: View {
                 restingTrackHeight: 7,
                 draggingTrackHeight: 11,
                 tintOverride: progressSliderTint,
-                desaturatesWhenIdle: true
+                desaturatesWhenIdle: true,
+                hitHeight: 0
             )
         }
         .onAppear {
