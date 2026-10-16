@@ -158,6 +158,14 @@ class CalendarManager: ObservableObject {
         }
     }
 
+    /// The reminders access status, read without asking (see below).
+    func refreshReminderAuthorizationStatus() {
+        let status = EKEventStore.authorizationStatus(for: .reminder)
+        if status != reminderAuthorizationStatus {
+            reminderAuthorizationStatus = status
+        }
+    }
+
     /// The calendar access status, read without asking for access (asking
     /// shows the system prompt, which only a click of the user may do).
     func refreshCalendarAuthorizationStatus() {
@@ -201,6 +209,7 @@ class CalendarManager: ObservableObject {
 
         switch status {
         case .notDetermined:
+            guard AppRuntimeEnvironment.mayAskForPermissions else { return }
             let granted = await calendarService.requestAccess(to: .event)
             calendarAuthorizationStatus = granted ? .fullAccess : .denied
             if granted {
@@ -227,6 +236,7 @@ class CalendarManager: ObservableObject {
 
         switch status {
         case .notDetermined:
+            guard AppRuntimeEnvironment.mayAskForPermissions else { return }
             let granted = await calendarService.requestAccess(to: .reminder)
             reminderAuthorizationStatus = granted ? .fullAccess : .denied
             if granted {

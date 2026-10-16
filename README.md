@@ -21,11 +21,13 @@
   <img src="assets/readme/compact.png" width="820" alt="Skerry: the player in one row, with the next event beside it">
 </p>
 
-<!-- More screenshots to come: assets/readme/batch.png, clipboard.png, now.png -->
-
 ## Why Skerry
 
 **Screenshots in batches.** Take a few screenshots as usual (⇧⌘3, ⇧⌘4, ⇧⌘5). They collect into one batch at the notch, and **Paste into Claude · 3** drops the whole batch into the app you were working in. You can pick which shots go, drag the batch anywhere, mark a shot up, or AirDrop it. Optionally, shots taken straight to the clipboard (⌃⇧⌘3/4) join the batch too. They live in a temporary folder and are gone within a day.
+
+<p align="center">
+  <img src="assets/readme/batch.png" width="820" alt="Skerry: a screenshot batch at the notch with Paste into Claude, above the clipboard">
+</p>
 
 **A clipboard history you can trust.**
 - Everything you copy shows up as a card, with search, filters and pins.
@@ -43,6 +45,10 @@
 - **Hotkeys**.
 - **English and Russian**.
 - While your screen is shared or recorded, the clipboard and screenshots show only their titles, and the notch keeps quiet.
+
+<p align="center">
+  <img src="assets/readme/shelf.png" width="820" alt="Skerry: the shelf, with AirDrop and a place to drop files">
+</p>
 
 ## Privacy
 

@@ -128,6 +128,9 @@ class BluetoothAudioManager: ObservableObject {
     // MARK: - Initialization
     private init() {
         print("🎧 [BluetoothAudioManager] Initializing...")
+        // Listing paired devices is what asks for Bluetooth; a test host
+        // must not (see AppRuntimeEnvironment.mayAskForPermissions).
+        guard AppRuntimeEnvironment.mayAskForPermissions else { return }
         setupBluetoothObservers()
         setupAirPodsListeningModeObservers()
         setupAirPodsListeningModeLogObserver()
@@ -2307,6 +2310,8 @@ private final class BluetoothLEBatteryReader: NSObject, CBCentralManagerDelegate
 
     override init() {
         super.init()
+        // Creating the manager is what asks for Bluetooth.
+        guard AppRuntimeEnvironment.mayAskForPermissions else { return }
         central = CBCentralManager(delegate: self, queue: nil)
     }
 
@@ -2316,7 +2321,7 @@ private final class BluetoothLEBatteryReader: NSObject, CBCentralManagerDelegate
             return
         }
 
-        guard state == .idle else {
+        guard state == .idle, central != nil else {
             completion([])
             return
         }

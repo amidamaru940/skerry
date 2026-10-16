@@ -164,6 +164,8 @@ final class MediaKeyInterceptor {
     /// restarts the observer and so retries the tap by accident (#601).
     @discardableResult
     func start() -> Bool {
+        // A test host must not tap the keyboard: macOS asks for it.
+        guard AppRuntimeEnvironment.mayAskForPermissions else { return false }
         guard eventTap == nil else {
             updateTapState()
             return true
@@ -463,7 +465,7 @@ final class MediaKeyInterceptor {
 extension MediaKeyInterceptor {
     private func requestAccessibilityPermissionIfNeeded() {
         guard !AXIsProcessTrusted(), !didRequestAccessibilityPrompt else { return }
-        if AppRuntimeEnvironment.isUITesting { return }
+        guard AppRuntimeEnvironment.mayAskForPermissions else { return }
         let promptKey = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
         let options: CFDictionary = [promptKey: true] as CFDictionary
         _ = AXIsProcessTrustedWithOptions(options)

@@ -165,6 +165,9 @@ class DownloadManager {
     }
     
     private func startMonitoring() {
+        // Opening the folder is what asks for access to Downloads; a test
+        // host must not (see AppRuntimeEnvironment.mayAskForPermissions).
+        guard AppRuntimeEnvironment.mayAskForPermissions else { return }
         guard source == nil, let downloadsDirectory else { return }
         
         monitorSession &+= 1
@@ -256,6 +259,8 @@ class DownloadManager {
     }
 
     private func sampleSpeed() {
+        // Reads the real Downloads folder: never from a test host.
+        guard AppRuntimeEnvironment.mayAskForPermissions else { return }
         guard let downloadsDirectory else { return }
 
         let session = speedSession
@@ -531,7 +536,11 @@ class DownloadManager {
     }
 #endif
 
+    /// Listing the folder is what asks for access to Downloads. Only when the
+    /// download listener is on -- it used to ask on every launch, with the
+    /// feature off -- and never from a test host.
     private func requestDownloadsPermissionIfNeeded() {
+        guard AppRuntimeEnvironment.mayAskForPermissions, Defaults[.enableDownloadListener] else { return }
         guard let downloadsDirectory else { return }
         _ = try? FileManager.default.contentsOfDirectory(at: downloadsDirectory, includingPropertiesForKeys: nil)
     }

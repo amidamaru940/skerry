@@ -33,6 +33,11 @@ enum NextEvents {
         /// Nothing left today or tomorrow.
         case free
         case events([EventModel])
+
+        var shownEvents: Int {
+            if case .events(let events) = self { return events.count }
+            return 0
+        }
     }
 
     /// Events still running or to come, today and tomorrow, earliest first:
@@ -67,6 +72,14 @@ enum NextEvents {
         guard authorized else { return .noAccess }
         let next = pick(events, now: now, hideAllDay: hideAllDay, calendar: calendar, limit: limit)
         return next.isEmpty ? .free : .events(next)
+    }
+
+    /// Whether "Next" offers to show reminders too: calendar access is there,
+    /// reminders are a separate permission nobody has answered yet, and a line
+    /// is free for the offer. Skerry never asked for reminders, so they were
+    /// missing from "Next" with nothing to say why.
+    static func offersReminders(calendarAuthorized: Bool, remindersUndecided: Bool, shownEvents: Int, limit: Int) -> Bool {
+        calendarAuthorized && remindersUndecided && shownEvents < limit
     }
 
     /// Today or tomorrow, by the day the event is still on at `now`.

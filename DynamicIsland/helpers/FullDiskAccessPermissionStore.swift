@@ -75,6 +75,7 @@ enum ShelfFolderAccessAuthorization {
     }
 
     static func requestAccessProbe() {
+        guard AppRuntimeEnvironment.mayAskForPermissions else { return }
         if let documentsDirectoryURL {
             _ = try? FileManager.default.contentsOfDirectory(at: documentsDirectoryURL, includingPropertiesForKeys: nil)
         }

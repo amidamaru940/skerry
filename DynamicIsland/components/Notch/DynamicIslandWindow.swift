@@ -62,12 +62,38 @@ class DynamicIslandWindow: NSPanel {
         ScreenCaptureVisibilityManager.shared.register(self, scope: .entireInterface)
     }
     
+    /// The unit-test host is a whole second Skerry. Its island used to show
+    /// up over the real one, and when a test opened it, it took the keyboard
+    /// from whatever the person was typing in. Under tests the window exists
+    /// for the code that expects it, but is never shown and never key.
+    static var staysHidden: Bool { AppRuntimeEnvironment.isHostingUnitTests }
+
     override var canBecomeKey: Bool {
-        true
+        !Self.staysHidden
     }
     
     override var canBecomeMain: Bool {
-        true
+        !Self.staysHidden
+    }
+
+    override func orderFront(_ sender: Any?) {
+        guard !Self.staysHidden else { return }
+        super.orderFront(sender)
+    }
+
+    override func orderFrontRegardless() {
+        guard !Self.staysHidden else { return }
+        super.orderFrontRegardless()
+    }
+
+    override func makeKeyAndOrderFront(_ sender: Any?) {
+        guard !Self.staysHidden else { return }
+        super.makeKeyAndOrderFront(sender)
+    }
+
+    override func order(_ place: NSWindow.OrderingMode, relativeTo otherWin: Int) {
+        guard !Self.staysHidden || place == .out else { return }
+        super.order(place, relativeTo: otherWin)
     }
 
     // MARK: Keyboard (Skerry)

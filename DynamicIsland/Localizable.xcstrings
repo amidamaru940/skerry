@@ -90298,6 +90298,16 @@
           }
         }
       }
+    },
+    "Reminders too" : {
+      "localizations" : {
+        "ru" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "И напоминания"
+          }
+        }
+      }
     }
   },
   "version" : "1.2"

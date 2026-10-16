@@ -38,4 +38,10 @@ enum AppRuntimeEnvironment {
         return false
         #endif
     }()
+
+    /// Whether the app may ask macOS for a permission: Accessibility,
+    /// Calendar, Bluetooth, Location, or a folder. Never while it hosts tests.
+    /// To macOS the test host is an app of its own, so every test run asked
+    /// the person at the Mac again, and an ad-hoc signed host on every build.
+    static let mayAskForPermissions: Bool = !isUITesting && !isHostingUnitTests
 }

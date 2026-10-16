@@ -43,6 +43,7 @@ final class AccessibilityPermissionStore: ObservableObject {
     }
 
     func requestAuthorizationPrompt() {
+        guard AppRuntimeEnvironment.mayAskForPermissions else { return }
 #if canImport(ApplicationServices)
         let promptKey = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
         let options: CFDictionary = [promptKey: true] as CFDictionary

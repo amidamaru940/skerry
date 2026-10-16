@@ -144,6 +144,7 @@ PrivateWorks
 !tests/test_fork_configuration.py
 !tests/test_network_allowlist.py
 !tests/test_localization.py
+!tests/test_permission_prompts.py
 *.sh
 comparison_report.json
 *.txt

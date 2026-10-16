@@ -775,17 +775,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if ScreenPresentation.needsCaptureMonitoring(
             recordingDetection: Defaults[.enableScreenRecordingDetection],
             hideWhilePresenting: Defaults[.hideContentWhilePresenting]
-        ) && !AppRuntimeEnvironment.isUITesting {
+        ) && AppRuntimeEnvironment.mayAskForPermissions {
             ScreenRecordingManager.shared.startMonitoring()
         }
 
         // Setup Do Not Disturb Manager
-        if Defaults[.enableDoNotDisturbDetection] && !AppRuntimeEnvironment.isUITesting {
+        if Defaults[.enableDoNotDisturbDetection] && AppRuntimeEnvironment.mayAskForPermissions {
             dndManager.startMonitoring()
         }
 
-        // Setup Privacy Indicator Manager (camera/mic; skipped under UI testing).
-        if !AppRuntimeEnvironment.isUITesting {
+        // Setup Privacy Indicator Manager (camera/mic; skipped under tests).
+        if AppRuntimeEnvironment.mayAskForPermissions {
             PrivacyIndicatorManager.shared.startMonitoring()
             networkConnectivityManager.startMonitoring()
         }
@@ -1133,8 +1133,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             adjustWindowPosition(changeAlpha: true)
         }
         
-        // Skip onboarding window and welcome sound under UI testing.
-        if !AppRuntimeEnvironment.isUITesting {
+        // Skip onboarding window and welcome sound under tests: onboarding
+        // asks for permissions.
+        if AppRuntimeEnvironment.mayAskForPermissions {
             // Also when it was left half way last time (step D7).
             if OnboardingFlow.isNeeded(completed: Defaults[.onboardingCompleted],
                                        firstLaunch: coordinator.firstLaunch,
@@ -1150,8 +1151,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         
         previousScreens = NSScreen.screens
 
-        // Skip weather under UI testing: prepareLocationAccess prompts for Location.
-        if Defaults[.enableLockScreenWeatherWidget] && !AppRuntimeEnvironment.isUITesting {
+        // Skip weather under tests: prepareLocationAccess prompts for Location.
+        if Defaults[.enableLockScreenWeatherWidget] && AppRuntimeEnvironment.mayAskForPermissions {
             LockScreenWeatherManager.shared.prepareLocationAccess()
             Task { @MainActor in
                 await LockScreenWeatherManager.shared.refresh(force: true)

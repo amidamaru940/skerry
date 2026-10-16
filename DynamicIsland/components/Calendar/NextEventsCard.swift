@@ -18,6 +18,7 @@
 
 import AppKit
 import Defaults
+import EventKit
 import SwiftUI
 
 /// "Next" beside the player: the next two or three events today and
@@ -48,13 +49,20 @@ struct NextEventsCard: View {
                 hideAllDay: hideAllDayEvents,
                 limit: limit
             )
+            let offersReminders = NextEvents.offersReminders(
+                calendarAuthorized: calendarManager.hasCalendarAccess,
+                remindersUndecided: calendarManager.reminderAuthorizationStatus == .notDetermined,
+                shownEvents: state.shownEvents,
+                limit: limit
+            )
+            let remindersOffer: (() -> Void)? = offersReminders ? allowReminders : nil
             switch style {
             case .card:
-                NextEventsCardContent(state: state, now: context.date, onAllowAccess: allowAccess, onOpen: open)
+                NextEventsCardContent(state: state, now: context.date, onAllowAccess: allowAccess, onAllowReminders: remindersOffer, onOpen: open)
             case .lines:
-                NextEventLines(state: state, now: context.date, onAllowAccess: allowAccess, onOpen: open)
+                NextEventLines(state: state, now: context.date, onAllowAccess: allowAccess, onAllowReminders: remindersOffer, onOpen: open)
             case .headedLines:
-                NextEventLines(state: state, now: context.date, showsHeading: true, onAllowAccess: allowAccess, onOpen: open)
+                NextEventLines(state: state, now: context.date, showsHeading: true, onAllowAccess: allowAccess, onAllowReminders: remindersOffer, onOpen: open)
                     .padding(.horizontal, 6)
             }
         }
@@ -65,7 +73,16 @@ struct NextEventsCard: View {
     }
 
     private func refresh() {
+        calendarManager.refreshReminderAuthorizationStatus()
         Task { await calendarManager.updateUpcomingEvents() }
+    }
+
+    /// Reminders are a permission of their own; asked on this click only.
+    private func allowReminders() {
+        Task {
+            await calendarManager.checkReminderAuthorization()
+            await calendarManager.updateUpcomingEvents(force: true)
+        }
     }
 
     private func open(_ event: EventModel) {
@@ -79,6 +96,8 @@ struct NextEventsCard: View {
         case .notDetermined:
             Task {
                 await calendarManager.checkCalendarAuthorization()
+                // "Next" shows reminders too, which macOS asks about apart.
+                await calendarManager.checkReminderAuthorization()
                 await calendarManager.updateUpcomingEvents(force: true)
             }
         default:
@@ -94,6 +113,8 @@ struct NextEventsCardContent: View {
     let state: NextEvents.State
     let now: Date
     var onAllowAccess: () -> Void = {}
+    /// Set while reminders can be offered (see `NextEvents.offersReminders`).
+    var onAllowReminders: (() -> Void)? = nil
     var onOpen: (EventModel) -> Void = { _ in }
 
     var body: some View {
@@ -112,6 +133,9 @@ struct NextEventsCardContent: View {
                 freeLine
             case .events(let events):
                 eventRows(events)
+            }
+            if let onAllowReminders {
+                RemindersOfferRow(onAllow: onAllowReminders)
             }
         }
         .padding(.horizontal, 14)
@@ -179,6 +203,8 @@ struct NextEventLines: View {
     /// "Next" and the date on top, when nothing plays in the compact island.
     var showsHeading = false
     var onAllowAccess: () -> Void = {}
+    /// Set while reminders can be offered (see `NextEvents.offersReminders`).
+    var onAllowReminders: (() -> Void)? = nil
     var onOpen: (EventModel) -> Void = { _ in }
 
     var body: some View {
@@ -211,6 +237,9 @@ struct NextEventLines: View {
                         onOpen(event)
                     }
                 }
+            }
+            if let onAllowReminders {
+                RemindersOfferRow(onAllow: onAllowReminders)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
@@ -281,6 +310,24 @@ private struct NextEventRow: View {
         case .now: return String(localized: "Now")
         case .allDay: return String(localized: "All day")
         case .at(let date): return date.formatted(date: .omitted, time: .shortened)
+        }
+    }
+}
+
+/// "Reminders too · Allow Access": one line in "Next" until the reminders
+/// permission is answered. A click asks macOS; nothing asks on its own.
+struct RemindersOfferRow: View {
+    let onAllow: () -> Void
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Label(String(localized: "Reminders too"), systemImage: "checklist")
+                .font(.system(size: 12))
+                .foregroundStyle(DS.Palette.textSecondary)
+                .lineLimit(1)
+            Button(String(localized: "Allow Access"), action: onAllow)
+                .buttonStyle(DSButtonStyle(kind: .secondary, height: 22))
+                .fixedSize()
         }
     }
 }

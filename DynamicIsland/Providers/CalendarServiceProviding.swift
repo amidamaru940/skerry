@@ -116,7 +116,8 @@ class CalendarService: CalendarServiceProviding {
                 }
 
                 let filtered = reminders.compactMap { reminder -> EventModel? in
-                    guard let dueDate = reminder.dueDateComponents?.date,
+                    guard let components = reminder.dueDateComponents,
+                          let dueDate = ReminderDue.date(of: components),
                           dueDate >= start,
                           dueDate <= end else {
                         return nil
@@ -138,6 +139,19 @@ class CalendarService: CalendarServiceProviding {
         } catch {
             print("Failed to update reminder completion: \(error)")
         }
+    }
+}
+
+/// When a reminder is due.
+///
+/// `DateComponents.date` is nil unless the components carry a calendar, and
+/// the due dates EventKit hands back often do not. Reminders made in the
+/// Reminders app were dropped from "Next" for that reason, while ones made
+/// another way showed. The components are read with the user's calendar
+/// instead, the way the event for a reminder already was.
+enum ReminderDue {
+    static func date(of components: DateComponents, calendar: Calendar = .current) -> Date? {
+        components.date ?? (components.calendar ?? calendar).date(from: components)
     }
 }
 
@@ -182,7 +196,7 @@ extension EventModel {
     init?(from reminder: EKReminder) {
         guard let calendar = reminder.calendar,
               let dueDateComponents = reminder.dueDateComponents,
-              let date = Calendar.current.date(from: dueDateComponents)
+              let date = ReminderDue.date(of: dueDateComponents)
         else { return nil }
         
         self.init(
