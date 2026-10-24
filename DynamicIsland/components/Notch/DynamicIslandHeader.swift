@@ -19,10 +19,10 @@
 import Defaults
 import SwiftUI
 
-/// The top row of the open island: the tabs on the left, the camera notch,
-/// and on the right a capsule for live states plus one "…" button whose
-/// popover holds what used to be six separate buttons (docs/PLAN-DESIGN.md
-/// §3.2).
+/// The top row of the open island: the tabs on the left as words, the camera
+/// notch, and on the right the live states (no capsule) plus one "…" glyph
+/// whose popover holds what used to be six separate buttons
+/// (docs/PLAN-DESIGN.md §3.2; look: docs/design/VISUAL-E.md §2.2).
 struct DynamicIslandHeader: View {
     @EnvironmentObject var vm: DynamicIslandViewModel
     @EnvironmentObject var webcamManager: WebcamManager
@@ -52,7 +52,11 @@ struct DynamicIslandHeader: View {
             .zIndex(2)
             .padding(.horizontal, DS.Space.s)
 
-            if vm.notchState == .open {
+            // The camera's gap, while the header sits beside the camera. On a
+            // screen with a notch the open header hangs below the menu bar
+            // (`OpenIslandNeck`), where there is no camera to leave room for.
+            if vm.notchState == .open,
+               OpenIslandNeck.bandHeight(forScreenNamed: vm.screen ?? coordinator.selectedScreen) == 0 {
                 let spacerWidth = min(vm.closedNotchSize.width, 300)
                 Rectangle()
                     .fill(NSScreen.screens
@@ -66,7 +70,8 @@ struct DynamicIslandHeader: View {
             HStack(spacing: DS.Space.s) {
                 if vm.notchState == .open {
                     IslandStatusCapsule { toggleMore(.keepAwake) }
-                    DSIconButton(symbol: "ellipsis", label: String(localized: "More"), isSelected: showMore) {
+                    // E: a bare glyph, white while its menu is open (VISUAL-E §2.2).
+                    GlyphButton(symbol: "ellipsis", label: String(localized: "More"), isOn: showMore) {
                         toggleMore(.menu)
                     }
                     .popover(isPresented: $showMore, arrowEdge: .bottom) {

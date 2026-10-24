@@ -22,9 +22,14 @@
 
 import SwiftUI
 
+/// A player control in E's language (docs/design/VISUAL-E.md §2.5): a bare
+/// glyph, no disc and no fill. ⏯ (`.large`) is 22/600 in a 40 pt box; the
+/// rest are 15/500 in 28 pt boxes, secondary at rest and white under the
+/// pointer, or in the fixed colour they are given (white while "on").
 struct HoverButton: View {
     var icon: String
-    var iconColor: Color = .white
+    /// A fixed colour; nil follows the pointer.
+    var iconColor: Color? = nil
     var scale: Image.Scale = .medium
     var pressEffect: PressEffect? = nil
     var contentTransition: ContentTransition = .symbolEffect
@@ -42,59 +47,25 @@ struct HoverButton: View {
     @State private var wiggleToken: Int = 0
     @State private var skipToken: Int = 0
     @State private var lastExternalTriggerToken: Int?
+    @Environment(\.colorSchemeContrast) private var contrast
 
     var body: some View {
-        let size = CGFloat(scale == .large ? 40 : 30)
-        
+        let size: CGFloat = scale == .large ? 40 : DS.hitTarget
+
         Button(action: {
             triggerPressEffect()
             action()
         }) {
-            Rectangle()
-                .fill(.clear)
-                .contentShape(Rectangle())
+            glyph
+                .foregroundStyle(glyphColor)
                 .frame(width: size, height: size)
-                .overlay {
-                    Capsule()
-                        .fill(isHovering ? DS.Palette.hoverFill : .clear)
-                        .frame(width: size, height: size)
-                        .overlay {
-                            if let skipDirection {
-                                SkipTrackGlyph(
-                                    direction: skipDirection,
-                                    size: glyphPointSize,
-                                    trigger: skipToken
-                                )
-                                .foregroundStyle(iconColor)
-                            } else {
-                                let baseImage = Image(systemName: icon)
-                                    .foregroundColor(iconColor)
-                                    .contentTransition(contentTransition)
-                                    .font(scale == .large ? .largeTitle : .body)
-
-                                if case .wiggle = pressEffect {
-                                    if #available(macOS 15.0, *) {
-                                        baseImage
-                                            .symbolEffect(
-                                                .wiggle.byLayer,
-                                                options: .nonRepeating,
-                                                value: wiggleToken
-                                            )
-                                    } else {
-                                        baseImage
-                                    }
-                                } else {
-                                    baseImage
-                                }
-                            }
-                        }
-                }
+                .contentShape(Rectangle())
         }
-        .buttonStyle(PlainButtonStyle())
+        .buttonStyle(PressDimStyle())
         .offset(x: pressOffset)
         .rotationEffect(.degrees(wiggleAngle))
         .onHover { hovering in
-            withAnimation(.smooth(duration: 0.3)) {
+            withAnimation(DS.hover) {
                 isHovering = hovering
             }
         }
@@ -105,15 +76,40 @@ struct HoverButton: View {
         }
     }
 
-    /// Point sizes for the two text styles this button draws at, resolved once
-    /// rather than on every body evaluation.
-    private static let largeGlyphPointSize = NSFont.preferredFont(forTextStyle: .largeTitle).pointSize
-    private static let regularGlyphPointSize = NSFont.preferredFont(forTextStyle: .body).pointSize
+    @ViewBuilder
+    private var glyph: some View {
+        if let skipDirection {
+            SkipTrackGlyph(direction: skipDirection, size: glyphPointSize, trigger: skipToken)
+        } else {
+            let baseImage = Image(systemName: icon)
+                .contentTransition(contentTransition)
+                .font(scale == .large ? DSE.Typeface.playPause : DSE.Typeface.glyphOpen)
 
-    /// Point size the skip glyph is drawn at, matched to the text style the
-    /// symbol would otherwise use so it sits like the icon it replaces.
+            if case .wiggle = pressEffect {
+                if #available(macOS 15.0, *) {
+                    baseImage
+                        .symbolEffect(
+                            .wiggle.byLayer,
+                            options: .nonRepeating,
+                            value: wiggleToken
+                        )
+                } else {
+                    baseImage
+                }
+            } else {
+                baseImage
+            }
+        }
+    }
+
+    private var glyphColor: Color {
+        iconColor ?? (isHovering ? DSE.Palette.text : DSE.Palette.secondary(contrast))
+    }
+
+    /// Point size the skip glyph is drawn at: the glyph size of the symbol it
+    /// replaces (§1.4 `glyph`).
     private var glyphPointSize: CGFloat {
-        scale == .large ? HoverButton.largeGlyphPointSize : HoverButton.regularGlyphPointSize
+        scale == .large ? 22 : 15
     }
 
     private func triggerPressEffect(override: PressEffect? = nil) {

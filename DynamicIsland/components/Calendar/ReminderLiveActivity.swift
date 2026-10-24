@@ -47,11 +47,23 @@ struct ReminderLiveActivity: View {
         }
     }
 
+    /// Equal wings (E §2.1): the island is centred on the camera, so the
+    /// countdown's wider wing slid «in 120 min» in under the camera. Each
+    /// side keeps its content flush to its wall.
+    static func closedGeometry(closedNotchWidth: CGFloat, leftWing: CGFloat, rightWing: CGFloat) -> ClosedWingGeometry {
+        ClosedWingGeometry.equalWings(closedNotchWidth: closedNotchWidth, leading: leftWing, trailing: rightWing)
+    }
+
     @ViewBuilder
     private func content(for reminder: ReminderLiveActivityManager.ReminderEntry, now: Date) -> some View {
+        let wing = Self.closedGeometry(
+            closedNotchWidth: vm.closedNotchSize.width,
+            leftWing: leftWingWidth,
+            rightWing: rightWingWidth(for: reminder, now: now)
+        ).wing
         HStack(spacing: 0) {
             Color.clear
-                .frame(width: leftWingWidth, height: notchContentHeight)
+                .frame(width: wing, height: notchContentHeight)
                 .background(alignment: .leading) {
                     iconSection(for: reminder, now: now)
                         .padding(.leading, wingPadding / 2)
@@ -63,7 +75,7 @@ struct ReminderLiveActivity: View {
                 .frame(width: vm.closedNotchSize.width, height: notchContentHeight)
 
             Color.clear
-                .frame(width: rightWingWidth(for: reminder, now: now), height: notchContentHeight)
+                .frame(width: wing, height: notchContentHeight)
                 .background(alignment: .trailing) {
                     rightSection(for: reminder, now: now)
                         .padding(.trailing, wingPadding / 2)

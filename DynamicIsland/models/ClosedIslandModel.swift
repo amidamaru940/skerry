@@ -21,12 +21,11 @@ import CoreGraphics
 import Defaults
 import Foundation
 
-/// Where the pointer arms the closed island (docs/PLAN-DESIGN.md §3.1).
-/// The camera housing hides the pointer, so the zone reaches past the notch:
-/// an "ear" on each side, in the menu bar where the pointer stays visible,
-/// and a thin strip below.
+/// Where a click opens the closed island and a hover on it stays. The
+/// hover itself starts on the drawn island (its own `.onHover`): the "ears"
+/// beside the notch (docs/PLAN-DESIGN.md §3.1) needed every pointer move of
+/// the session and were removed for energy (docs/perf/REPORT-energy.md §9).
 enum IslandHoverZone {
-    static let ear: CGFloat = 28
     static let below: CGFloat = 6
 
     /// The closed island as drawn: centred on the screen, shifted by
@@ -36,17 +35,15 @@ enum IslandHoverZone {
         CGRect(x: screenFrame.midX - width / 2 + xOffset, y: screenFrame.maxY - height, width: width, height: height)
     }
 
-    /// Where a click opens the island: the notch with 12 pt either side and
-    /// the strip below (upstream's hit area).
-    static let clickMargin: CGFloat = 12
-
-    /// The notch with its ears and the strip below.
-    static func zone(around notch: CGRect) -> CGRect {
-        CGRect(x: notch.minX - ear, y: notch.minY - below, width: notch.width + 2 * ear, height: notch.height + below)
-    }
-
+    /// Where a click opens the island and a hover on it stays: the notch and
+    /// the strip below it. No margin beside it (upstream had 12 pt either
+    /// side): macOS lays the menu titles out flush against the camera, so a
+    /// side margin lay on the nearest title, and a pointer resting there kept
+    /// the hover (the island opened after the delay) and a click there opened
+    /// the island along with the menu (owner, 22.10.2026: only the island
+    /// itself opens it). Below the notch there is no menu, so the strip stays.
     static func clickArea(around notch: CGRect) -> CGRect {
-        CGRect(x: notch.minX - clickMargin, y: notch.minY - below, width: notch.width + 2 * clickMargin, height: notch.height + below)
+        CGRect(x: notch.minX, y: notch.minY - below, width: notch.width, height: notch.height + below)
     }
 
     /// Inclusive on every edge: a pointer parked on the top pixel is inside.
@@ -54,18 +51,8 @@ enum IslandHoverZone {
         point.x >= rect.minX && point.x <= rect.maxX && point.y >= rect.minY && point.y <= rect.maxY
     }
 
-    /// What the pointer does to the hover state of the closed island. The
-    /// ears only arm it; leaving them ends a hover unless the pointer is
-    /// still over the drawn island (wide music wings reach past the ears).
-    enum Change: Equatable { case enter, exit, none }
-
-    static func change(inZone: Bool, overIsland: Bool, isHovering: Bool) -> Change {
-        if inZone || overIsland { return isHovering ? .none : .enter }
-        return isHovering ? .exit : .none
-    }
-
-    /// A click opens the island only on the island itself: a click in an
-    /// ear belongs to the menu bar item under it.
+    /// A click opens the island only on the island itself: a click beside
+    /// it belongs to the menu bar item under it.
     static func clickOpens(onNotch: Bool, overIsland: Bool) -> Bool {
         onNotch || overIsland
     }

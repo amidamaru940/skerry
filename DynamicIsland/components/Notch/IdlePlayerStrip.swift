@@ -30,6 +30,7 @@ struct IdlePlayerStrip: View {
             artwork: musicManager.hasActiveSession ? musicManager.albumArt : nil,
             title: musicManager.hasActiveSession ? musicManager.songTitle : nil,
             artist: musicManager.artistName,
+            controlsNote: musicManager.controlsNote,
             onResume: { MusicManager.shared.togglePlay() },
             onOpenPlayer: { MusicManager.shared.openMusicApp() }
         )
@@ -42,58 +43,68 @@ struct IdlePlayerStripContent: View {
     let artwork: NSImage?
     let title: String?
     let artist: String
+    /// While a video holds the controls ("Controls are with a video in
+    /// Chrome"): «Возобновить» would reach the video, so, as in the player,
+    /// it is dimmed and does nothing, and the note says why. It looked live
+    /// and silently did nothing (23.10).
+    var controlsNote: String? = nil
     var onResume: () -> Void = {}
     var onOpenPlayer: () -> Void = {}
 
     var body: some View {
+        // E: no plates; the paused cover at 0.6, the 5 % square without one,
+        // and a black secondary key (VISUAL-E §2.3, §2.6).
         HStack(spacing: 10) {
             Group {
                 if let artwork {
                     Image(nsImage: artwork)
                         .resizable()
                         .aspectRatio(contentMode: .fill)
-                        .saturation(0)
-                        .opacity(0.55)
+                        .opacity(DSE.Opacity.dimmed)
                 } else {
                     Image(systemName: "music.note")
-                        .font(.system(size: 15, weight: .medium))
-                        .foregroundStyle(DS.Palette.textTertiary)
+                        .font(DSE.Typeface.glyphOpen)
+                        .foregroundStyle(DSE.Palette.textTertiary)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .background(DS.Palette.card)
+                        .background(DSE.Palette.placeholder)
                 }
             }
             .frame(width: 36, height: 36)
-            .clipShape(RoundedRectangle(cornerRadius: DS.Radius.control, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: DSE.Radius.artClosed, style: .continuous))
 
             VStack(alignment: .leading, spacing: 1) {
                 Text(title ?? String(localized: "Nothing playing"))
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(DS.Palette.textSecondary)
+                    .eText(.body)
+                    .foregroundStyle(DSE.Palette.text)
                     .lineLimit(1)
                 Text(subtitle)
-                    .font(DS.Typeface.caption)
-                    .foregroundStyle(DS.Palette.textTertiary)
+                    .eText(.caption)
+                    .foregroundStyle(DSE.Palette.textTertiary)
                     .lineLimit(1)
             }
 
             Spacer(minLength: 8)
 
             if title != nil {
-                Button(action: onResume) {
-                    Label(String(localized: "Resume"), systemImage: "play.fill")
-                }
-                .buttonStyle(DSButtonStyle(kind: .secondary, height: 28))
+                Button(String(localized: "Resume"), action: onResume)
+                    .buttonStyle(SecondaryKeyStyle())
+                    .fixedSize()
+                    .disabled(controlsNote != nil)
+                    .opacity(controlsNote == nil ? 1 : DS.heldControlsOpacity)
+                    .animation(DS.hover, value: controlsNote == nil)
             } else {
                 Button(String(localized: "Open player"), action: onOpenPlayer)
-                    .buttonStyle(DSButtonStyle(kind: .quiet, height: 28))
+                    .buttonStyle(SecondaryKeyStyle())
+                    .fixedSize()
             }
         }
         .frame(height: 36)
         .accessibilityElement(children: .contain)
     }
 
-    private var subtitle: String {
+    var subtitle: String {
         guard title != nil else { return String(localized: "Music, podcasts and videos show up here") }
+        if let controlsNote { return controlsNote }
         let artist = artist.trimmingCharacters(in: .whitespacesAndNewlines)
         return artist.isEmpty ? String(localized: "Paused") : "\(artist) · \(String(localized: "Paused"))"
     }

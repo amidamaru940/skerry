@@ -116,6 +116,33 @@ class SettingsWindowController: NSWindowController {
         }
     }
     
+    /// The Clipboard page, for «Настройки…» in the island's «…» on «Буфер».
+    static let clipboardPage = "clipboard"
+
+    /// The page `showWindow(page:)` asked for, until the Settings view has
+    /// taken it: on the window's first showing the view is not there yet to
+    /// hear the notification, and takes the page when it appears.
+    private(set) static var requestedPage: String?
+
+    static func request(page: String) {
+        requestedPage = page
+    }
+
+    /// The asked-for page, once.
+    static func takeRequestedPage() -> String? {
+        defer { requestedPage = nil }
+        return requestedPage
+    }
+
+    /// Shows the window on one page (a `SettingsTab` raw name). The page is
+    /// set before the window shows, so a first window opens on it too.
+    func showWindow(page: String) {
+        Self.request(page: page)
+        // A Settings view already there takes it now, and the request is done.
+        NotificationCenter.default.post(name: GalleryMode.selectSettingsPage, object: page)
+        showWindow()
+    }
+
     override func close() {
         super.close()
         relinquishFocus()

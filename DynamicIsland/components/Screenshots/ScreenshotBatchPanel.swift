@@ -21,12 +21,12 @@ import Defaults
 import QuickLookThumbnailing
 import SwiftUI
 
-/// The screenshot batches in the Clipboard tab: a grid of thumbnails per
-/// batch, newest first, each with Select All, "…" and "Paste". A click
-/// adds or removes a screenshot, Cmd+A selects all, Esc deselects, space
-/// opens Quick Look, Cmd+C copies, dragging carries every selected file.
-/// (Its own title and button row, for the old Screenshots tab, went with
-/// that tab.)
+/// The screenshot batches in the Clipboard tab («Снимки»): per batch the
+/// action row (as in «Все») and its frames in rows, newest batch first. A
+/// click adds or removes a screenshot, Cmd+A selects all, Esc deselects,
+/// space opens Quick Look, Cmd+C copies, dragging carries every selected
+/// file. Buffer v3: the newest batch's key is lit, the others' are not
+/// (one light per state).
 struct ScreenshotBatchPanel: View {
     @ObservedObject private var manager = ScreenshotShelfManager.shared
     @ObservedObject var quickLook: QuickLookService
@@ -34,13 +34,32 @@ struct ScreenshotBatchPanel: View {
     @Default(.screenshotThumbnailSize) private var thumbnailWidth
     @State private var dragToken = UUID()
     @State private var gridWidth: CGFloat = 0
+    /// Without access to the screenshot folder: only the temporary clipboard
+    /// shots, the ones Skerry can show; the saved ones would be blank frames.
+    var onlyClipboardShots = false
+
+    /// The batches shown: all, or only their temporary clipboard shots
+    /// (by the path's text alone, so the guarded folder is never touched).
+    static func visibleBatches(_ batches: [ScreenshotBatch], onlyClipboardShots: Bool) -> [ScreenshotBatch] {
+        guard onlyClipboardShots else { return batches }
+        return batches.compactMap { batch in
+            var kept = batch
+            kept.items = batch.items.filter { TemporaryClipboardShots.holds(path: $0.path) }
+            return kept.items.isEmpty ? nil : kept
+        }
+    }
+
+    private var batches: [ScreenshotBatch] {
+        Self.visibleBatches(manager.store.batches, onlyClipboardShots: onlyClipboardShots)
+    }
 
     var body: some View {
+        let batches = batches
         VStack(alignment: .leading, spacing: 6) {
             ScrollView(.vertical, showsIndicators: false) {
-                LazyVStack(alignment: .leading, spacing: 10) {
-                    ForEach(manager.store.batches) { batch in
-                        batchSection(batch)
+                LazyVStack(alignment: .leading, spacing: 16) {
+                    ForEach(batches) { batch in
+                        batchSection(batch, isNewest: batch.id == batches.first?.id)
                     }
                 }
                 .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { gridWidth = $0 }
@@ -64,19 +83,16 @@ struct ScreenshotBatchPanel: View {
 
     // MARK: Grid
 
-    private func batchSection(_ batch: ScreenshotBatch) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 6) {
-                Text(ScreenshotBatchTitle.make(for: batch))
-                    // As the latest-batch strip and "Pinned" above it.
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(DS.Palette.textSecondary)
-                    .lineLimit(1)
-                Spacer(minLength: 4)
-                BatchSelectAllButton(batch: batch)
-                BatchActionsMenu(batch: batch, quickLook: quickLook)
-                BatchPasteButton(batch: batch, kind: .secondary)
-            }
+    private func batchSection(_ batch: ScreenshotBatch, isNewest: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            BatchActionRow(
+                batch: batch,
+                quickLook: quickLook,
+                isLit: isNewest,
+                onCommand: run,
+                onDragBegan: dragBegan,
+                onDragEnded: dragEnded
+            )
             let grid = ScreenshotGridLayout.columns(width: gridWidth, minimumTile: thumbnailWidth)
             LazyVGrid(
                 columns: Array(repeating: GridItem(.fixed(grid.tile), spacing: ScreenshotGridLayout.spacing), count: grid.count),
@@ -108,16 +124,17 @@ struct ScreenshotBatchPanel: View {
                 quickLook.show(urls: manager.selectedURLs)
             }
         case .selectAll:
-            manager.selectAll()
+            if onlyClipboardShots {
+                manager.selection = Set(batches.flatMap(\.items).map(\.id))
+            } else {
+                manager.selectAll()
+            }
         case .clearSelection:
             manager.clearSelection()
         case .removeSelected:
             manager.requestRemoval(manager.selection)
         case .copy:
-            manager.copySelected()
-            if !manager.selectedURLs.isEmpty {
-                BufferTabState.shared.show(toast: BufferTabState.copiedScreenshots(manager.selectedURLs.count), warning: false, for: 2)
-            }
+            BufferTabState.showCopied(after: manager.copySelected())
         }
     }
 
@@ -130,17 +147,35 @@ struct ScreenshotBatchPanel: View {
     private func dragEnded(_ succeeded: Bool) {
         manager.dragEnded(succeeded: succeeded)
         vm.setAutoCloseSuppression(false, token: dragToken)
+        // Dropped outside: close if the pointer is no longer over the island.
+        vm.shouldRecheckHover.toggle()
     }
 }
 
 /// "Today 20:31 · 3 screenshots", "Yesterday 18:02 · 1 screenshot",
-/// "14 Oct 09:15 · 5 screenshots" — with the language's plural forms.
+/// "14 Oct 09:15 · 5 screenshots" — with the language's plural forms. The
+/// action row splits it: «3 снимка» over «сегодня 12:36 PM».
 enum ScreenshotBatchTitle {
     static func make(for batch: ScreenshotBatch, now: Date = Date(), calendar: Calendar = .current,
                      bundle: Bundle = .main, locale: Locale = .current) -> String {
+        let countFormat = bundle.localizedString(forKey: "%lld screenshots", value: "%lld screenshots", table: nil)
+        let count = String(format: countFormat, locale: locale, batch.items.count)
+        return "\(when(for: batch, now: now, calendar: calendar, bundle: bundle, locale: locale)) · \(count)"
+    }
+
+    /// «3 снимка»: the action row's title.
+    static func count(for batch: ScreenshotBatch, bundle: Bundle = .main, locale: Locale = .current) -> String {
+        let countFormat = bundle.localizedString(forKey: "%lld shots", value: "%lld shots", table: nil)
+        return String(format: countFormat, locale: locale, batch.items.count)
+    }
+
+    /// "Today 20:31"; `lowercased` gives «сегодня 12:36 PM», the caption
+    /// under the count.
+    static func when(for batch: ScreenshotBatch, now: Date = Date(), calendar: Calendar = .current,
+                     bundle: Bundle = .main, locale: Locale = .current, lowercased: Bool = false) -> String {
         let start = batch.startedAt
         let time = start.formatted(Date.FormatStyle(date: .omitted, time: .shortened).locale(locale))
-        let day: String
+        var day: String
         if calendar.isDate(start, inSameDayAs: now) {
             day = bundle.localizedString(forKey: "Today", value: "Today", table: nil)
         } else if let yesterday = calendar.date(byAdding: .day, value: -1, to: now), calendar.isDate(start, inSameDayAs: yesterday) {
@@ -148,54 +183,76 @@ enum ScreenshotBatchTitle {
         } else {
             day = start.formatted(Date.FormatStyle().day().month(.abbreviated).locale(locale))
         }
-        let countFormat = bundle.localizedString(forKey: "%lld screenshots", value: "%lld screenshots", table: nil)
-        let count = String(format: countFormat, locale: locale, batch.items.count)
-        return "\(day) \(time) · \(count)"
+        if lowercased { day = day.lowercased(with: locale) }
+        return "\(day) \(time)"
     }
 }
 
-/// One thumbnail with the AppKit click/drag layer on top.
+/// One film frame with the AppKit click/drag layer on top (VISUAL-E §2.7):
+/// 16:10, radius 8, a 0.5 pt rim (0.25 under the pointer), the accent rim
+/// with its glow when ticked, no badge. With `moreCount` it is the last frame
+/// of a long film: the shot at 0.35 under «+N», and a click shows them all.
 struct ScreenshotTile: View {
     let item: ScreenshotItem
     let width: Double
     let isSelected: Bool
+    var moreCount: Int? = nil
+    var onMore: (() -> Void)? = nil
     let onCommand: (ScreenshotGridCommand) -> Void
     let onDragBegan: ([URL]) -> Void
     let onDragEnded: (Bool) -> Void
 
     @ObservedObject private var manager = ScreenshotShelfManager.shared
     @State private var image: NSImage?
+    @State private var isHovering = false
 
-    var size: CGSize { CGSize(width: width, height: (width * 0.62).rounded()) }
+    var size: CGSize { CGSize(width: width, height: (width * ScreenshotGridLayout.aspect).rounded()) }
 
     var body: some View {
         ZStack {
-            RoundedRectangle(cornerRadius: DS.Radius.card, style: .continuous)
-                .fill(Color.white.opacity(0.06))
             if let image {
                 Image(nsImage: image)
                     .resizable()
                     .aspectRatio(contentMode: .fill)
             } else {
+                DSE.Palette.placeholder
                 Image(systemName: item.url.pathExtension.lowercased() == "mov" ? "video" : "photo")
-                    .foregroundStyle(.white.opacity(0.4))
+                    .font(.system(size: 15))
+                    .foregroundStyle(DSE.Palette.textTertiary)
             }
         }
         .frame(width: size.width, height: size.height)
-        .clipShape(RoundedRectangle(cornerRadius: DS.Radius.card, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: DS.Radius.card, style: .continuous)
-                .strokeBorder(isSelected ? Color.accentColor : Color.white.opacity(0.1), lineWidth: isSelected ? 2.5 : 1)
-        )
-        .overlay(alignment: .topTrailing) {
-            if isSelected {
-                Image(systemName: "checkmark.circle.fill")
-                    .font(.system(size: 13, weight: .bold))
-                    .foregroundStyle(.white, Color.accentColor)
-                    .padding(3)
+        .opacity(moreCount == nil ? 1 : DSE.Opacity.disabled)
+        .overlay {
+            if let moreCount {
+                Text(verbatim: "+\(moreCount)")
+                    .eText(.plusN)
+                    .foregroundStyle(DSE.Palette.text)
             }
         }
-        .overlay(
+        .clipShape(RoundedRectangle(cornerRadius: DSE.Radius.frame, style: .continuous))
+        .hairlineRim(cornerRadius: DSE.Radius.frame, emphasized: isHovering)
+        .selectionRim(isSelected)
+        .overlay { interaction }
+        .onHover { hovering in withAnimation(DS.hover) { isHovering = hovering } }
+        .help(moreCount == nil ? item.url.lastPathComponent : BufferSegment.screenshots.title)
+        .accessibilityElement()
+        .accessibilityLabel(Text(verbatim: moreCount.map { "+\($0), \(BufferSegment.screenshots.title)" } ?? item.url.lastPathComponent))
+        .accessibilityAddTraits(moreCount != nil ? .isButton : (isSelected ? .isSelected : []))
+        .accessibilityAction { onMore?() }
+        .task(id: "\(item.path)|\(Int(width / 40))") {
+            // Re-render only when the size moves to a new step, not on every slider tick.
+            let step = (width / 40).rounded(.up) * 40
+            image = await ScreenshotThumbnails.shared.thumbnail(for: item.url, size: CGSize(width: step * 2, height: step * 1.3))
+        }
+    }
+
+    @ViewBuilder
+    private var interaction: some View {
+        if let onMore {
+            Button(action: onMore) { Color.clear.contentShape(Rectangle()) }
+                .buttonStyle(PressDimStyle())
+        } else {
             ScreenshotDragSource(
                 image: image,
                 onClick: { click in
@@ -207,15 +264,6 @@ struct ScreenshotTile: View {
                 onDragEnded: onDragEnded,
                 onCommand: onCommand
             )
-        )
-        .help(item.url.lastPathComponent)
-        .accessibilityElement()
-        .accessibilityLabel(Text(item.url.lastPathComponent))
-        .accessibilityAddTraits(isSelected ? .isSelected : [])
-        .task(id: "\(item.path)|\(Int(width / 40))") {
-            // Re-render only when the size moves to a new step, not on every slider tick.
-            let step = (width / 40).rounded(.up) * 40
-            image = await ScreenshotThumbnails.shared.thumbnail(for: item.url, size: CGSize(width: step * 2, height: step * 1.3))
         }
     }
 }
@@ -284,7 +332,35 @@ struct ScreenshotFlashLiveActivity: View {
 /// least the chosen size fit, stretched to share what is left. Fixed-size
 /// tiles left up to a tile's width empty on the right.
 enum ScreenshotGridLayout {
-    static let spacing: CGFloat = 8
+    static let spacing: CGFloat = DSE.Size.filmGap
+    /// Frames are 16:10, the shape of a Mac screenshot (184 × 115).
+    static let aspect: CGFloat = DSE.Size.film.height / DSE.Size.film.width
+
+    /// The latest batch's film: three frames across the width, `spacing`
+    /// apart (184 × 115 across the 570 content). Before the width is known,
+    /// the E size.
+    static func filmFrame(width: CGFloat) -> CGSize {
+        guard width > 0 else { return DSE.Size.film }
+        let tile = ((width - spacing * 2) / 3).rounded(.down)
+        return CGSize(width: tile, height: (tile * aspect).rounded())
+    }
+
+    /// The film's frames in «Все»: up to three; from four shots on, the third
+    /// is «+N», N the shots not shown.
+    static let filmFrames = 3
+
+    static func filmMore(count: Int) -> Int? {
+        count > filmFrames ? count - (filmFrames - 1) : nil
+    }
+
+    /// The thumbnail sizes of the «Снимки» line, small to large: 4, 3 and 2
+    /// frames a row across the 570 content (the setting keeps its 70…200).
+    static let sizeSteps: [Double] = [110, 160, 200]
+
+    /// The step nearest a stored size.
+    static func sizeStep(for width: Double) -> Int {
+        sizeSteps.indices.min { abs(sizeSteps[$0] - width) < abs(sizeSteps[$1] - width) } ?? 0
+    }
 
     static func columns(width: CGFloat, minimumTile: CGFloat) -> (count: Int, tile: CGFloat) {
         guard width > 0, minimumTile > 0 else { return (1, minimumTile) }

@@ -142,6 +142,8 @@ class AppleMusicController: MediaControllerProtocol {
     private let commandUpdateDelay: Duration
     private let commandExecutor: (String) async -> Void
     private let playbackInfoProvider: () async -> AppleMusicPlaybackInfo?
+    /// The same read for `refreshAfterClick`, through the check that may ask.
+    private let clickedPlaybackInfoProvider: () async -> AppleMusicPlaybackInfo?
     private let catalogArtworkProvider: ((String, String, String) async -> Data?)?
 
     // MARK: - Initialization
@@ -154,12 +156,15 @@ class AppleMusicController: MediaControllerProtocol {
     ) {
         self.commandUpdateDelay = commandUpdateDelay
         self.commandExecutor = commandExecutor ?? Self.executeAppleMusicCommand
-        self.playbackInfoProvider = playbackInfoProvider ?? Self.fetchAppleMusicPlaybackInfo
+        self.playbackInfoProvider = playbackInfoProvider ?? { await Self.fetchAppleMusicPlaybackInfo(afterClick: false) }
+        self.clickedPlaybackInfoProvider = playbackInfoProvider ?? Self.fetchAppleMusicPlaybackInfoAfterClick
         self.catalogArtworkProvider = catalogArtworkProvider
 
         guard startsObservers else { return }
 
         setupPlaybackStateChangeObserver()
+        // Reads Music only once macOS allows it (AutomationConsent): a read
+        // nobody clicked for must not bring up the Automation question.
         Task {
             if isActive() {
                 await updatePlaybackInfo()
@@ -238,6 +243,21 @@ class AppleMusicController: MediaControllerProtocol {
     func updatePlaybackInfo() async {
         let generation = await beginPlaybackInfoRequest()
         guard let info = await playbackInfoProvider() else { return }
+        await applyPlaybackInfo(info, generation: generation)
+    }
+
+    /// The read after a click that needs Music but sends it nothing itself:
+    /// a control in Auto while macOS reports Music, choosing Music as the
+    /// source, «Open player» (§5.8). It goes through the check that may ask,
+    /// so on a Mac without an answer this is when the question comes up; after
+    /// a yes the ordinary reads take over. Nothing to do once Music is
+    /// allowed, nor while it is closed: the read would launch it.
+    /// - Parameter launched: Skerry has just opened Music, which `isActive()`
+    ///   may not show yet.
+    func refreshAfterClick(launched: Bool = false) async {
+        guard launched || isActive(), AutomationConsent.music.status != .allowed else { return }
+        let generation = await beginPlaybackInfoRequest()
+        guard let info = await clickedPlaybackInfoProvider() else { return }
         await applyPlaybackInfo(info, generation: generation)
     }
 
@@ -335,7 +355,10 @@ class AppleMusicController: MediaControllerProtocol {
         await AppleMusicFavoriting.setCurrentTrackFavorited(favorited)
     }
 
+    /// Every command comes from a click on a player control or a media key,
+    /// which is when macOS may ask about Music.
     private static func executeAppleMusicCommand(_ command: String) async {
+        guard await AutomationConsent.music.allowsClickedEvent() else { return }
         let script = "tell application \"Music\" to \(command)"
         try? await AppleScriptHelper.executeVoid(script)
     }
@@ -346,8 +369,12 @@ class AppleMusicController: MediaControllerProtocol {
         await updatePlaybackInfo()
     }
     
-    private static func fetchAppleMusicPlaybackInfo() async -> AppleMusicPlaybackInfo? {
-        guard let descriptor = try? await fetchPlaybackInfoDescriptor() else { return nil }
+    private static func fetchAppleMusicPlaybackInfoAfterClick() async -> AppleMusicPlaybackInfo? {
+        await fetchAppleMusicPlaybackInfo(afterClick: true)
+    }
+
+    private static func fetchAppleMusicPlaybackInfo(afterClick: Bool) async -> AppleMusicPlaybackInfo? {
+        guard let descriptor = try? await fetchPlaybackInfoDescriptor(afterClick: afterClick) else { return nil }
         guard descriptor.numberOfItems >= 9 else { return nil }
 
         let repeatModeValue = descriptor.atIndex(8)?.int32Value ?? 0
@@ -369,7 +396,16 @@ class AppleMusicController: MediaControllerProtocol {
         )
     }
 
-    private static func fetchPlaybackInfoDescriptor() async throws -> NSAppleEventDescriptor? {
+    /// Nobody clicked for a read (launch, a change Music posted, the island
+    /// opening), so it never asks: until Music is allowed, Auto shows it
+    /// through the system Now Playing. Only `refreshAfterClick` reads after a
+    /// click, and that read may ask.
+    private static func fetchPlaybackInfoDescriptor(afterClick: Bool) async throws -> NSAppleEventDescriptor? {
+        let consent = AutomationConsent.music
+        let allowed = afterClick
+            ? await consent.allowsClickedEvent()
+            : await consent.allowsUnclickedEvent()
+        guard allowed else { return nil }
         let script = """
         tell application "Music"
             try
@@ -427,8 +463,14 @@ enum AppleMusicFavoriting {
         NSWorkspace.shared.runningApplications.contains { $0.bundleIdentifier == bundleIdentifier }
     }
 
+    /// Looked up on every change of track, which nobody clicked for. Until
+    /// Music is allowed it reports nil, which LikeTrackPresentation draws as a
+    /// dimmed heart that takes no click.
+    /// TODO(R11, §5.8): give that heart a "not asked yet" look that takes the
+    /// click. The click already goes to `setCurrentTrackFavorited`, which asks.
     static func isCurrentTrackFavorited() async -> Bool? {
-        guard await isAvailable else { return nil }
+        guard await isAvailable,
+              await AutomationConsent.music.allowsUnclickedEvent() else { return nil }
         for property in propertyNames {
             guard let descriptor = try? await AppleScriptHelper.execute(
                 "tell application \"Music\" to return \(property) of current track"
@@ -440,7 +482,8 @@ enum AppleMusicFavoriting {
 
     @discardableResult
     static func setCurrentTrackFavorited(_ favorited: Bool) async -> Bool {
-        guard await isAvailable else { return false }
+        guard await isAvailable,
+              await AutomationConsent.music.allowsClickedEvent() else { return false }
         for property in propertyNames {
             do {
                 try await AppleScriptHelper.executeVoid(

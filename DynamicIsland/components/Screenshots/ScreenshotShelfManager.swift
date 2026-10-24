@@ -47,13 +47,27 @@ final class ScreenshotShelfManager: ObservableObject {
     private var clipboardCollector: ClipboardScreenshotCollector?
     private var cancellables = Set<AnyCancellable>()
     private var flashWork: DispatchWorkItem?
-    private var locationTimer: Timer?
     private var started = false
+    /// Clipboard screenshots are collected from launch: they need no folder,
+    /// so they do not wait for the screenshot folder's first look (§5.8).
+    private var clipboardPartStarted = false
+    /// The folder is being looked at, off the main thread, before start().
+    private var lookingAtFolder = false
+    /// The last folder looked at off the main thread: macOS has answered for it.
+    private var answeredFolder: URL?
+
+    /// Where the app's batches are saved; there once a screenshot was collected.
+    nonisolated static var batchesFile: URL {
+        AppDataDirectory.folder("Screenshots").appendingPathComponent("batches.json")
+    }
 
     private convenience init() {
         self.init(store: ScreenshotBatchStore(
-            fileURL: AppDataDirectory.folder("Screenshots").appendingPathComponent("batches.json"),
-            batchGap: { TimeInterval(Defaults[.screenshotBatchGapMinutes]) * 60 }
+            fileURL: Self.batchesFile,
+            batchGap: { TimeInterval(Defaults[.screenshotBatchGapMinutes]) * 60 },
+            // Created by the first island view, on the main thread at launch:
+            // start() prunes, once the screenshot folder is answered for.
+            pruneOnLoad: false
         ))
     }
 
@@ -66,12 +80,92 @@ final class ScreenshotShelfManager: ObservableObject {
             .store(in: &cancellables)
     }
 
-    /// Called once at launch.
-    func start() {
+    /// At launch: only once the screenshot folder has been looked at after
+    /// the person asked for screenshots, and only while it is the folder
+    /// macOS answered for then. The folder is usually the Desktop, and the
+    /// first look at it brings up a macOS prompt (§5.8); a folder moved
+    /// while Skerry was not running waits for the next use of screenshots.
+    /// An install that ran an earlier build has the flag for any folder
+    /// (`migrateFolderFirstTouch`).
+    func startAtLaunch() {
+        // With the folder not asked for yet (a fresh install, onboarding
+        // skipped), ⌃⇧⌘4 still lands in a batch: the history leaves such a
+        // picture to the batches whenever both switches are on.
+        startClipboardCollecting()
+        guard FolderFirstTouch.launchLooksAtScreenshotFolder(
+            ScreenshotLocation.current(),
+            touched: Defaults[.screenshotFolderTouched],
+            touchedPath: Defaults[.screenshotFolderTouchedPath]
+        ) else { return }
+        lookAtFolderThenStart()
+    }
+
+    /// The person asked for screenshots: «Continue» on onboarding step 2
+    /// with Screenshots on, a click on the Screenshots segment, or collecting
+    /// turned on in Settings. macOS may ask for the folder now; once it has
+    /// answered, later launches start on their own while the folder stays
+    /// where it is. Nothing once started.
+    func startOnFirstUse() {
+        lookAtFolderThenStart()
+    }
+
+    /// «Use ~/Screenshots» in Settings and «Сохранять в ~/Screenshots» on the
+    /// island's «Нет доступа к папке», each after its question: macOS saves
+    /// screenshots to a folder it does not guard, the folder is looked at
+    /// again, and collecting starts there (the person asked). False when the
+    /// setting could not be changed.
+    @discardableResult
+    func useRecommendedFolder() -> Bool {
+        let changed = ScreenshotSystemSettings.useFolder(ScreenshotLocation.recommendedFolder())
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+            guard let self else { return }
+            self.refreshFolder()
+            // Asking for screenshots too, in a folder macOS does not guard.
+            if changed, !ScreenshotLocation.isDesktopOrDocuments(ScreenshotLocation.current()) {
+                self.startOnFirstUse()
+            }
+        }
+        return changed
+    }
+
+    /// ⌃⌥⌘S (Buffer v3): «Буфер» moves to «Снимки». The person asked for
+    /// screenshots, so their folder may be looked at now (§5.8).
+    func openShotsByRequest() {
+        BufferTabState.shared.segment = .screenshots
+        startOnFirstUse()
+    }
+
+    /// The first look at a guarded folder waits for the person's answer, so
+    /// it is taken off the main thread (ProtectedFolder). A refused folder
+    /// then reads as `canReadFolder == false`.
+    private func lookAtFolderThenStart() {
+        // Looking at the folder is what asks for it; a test host must not
+        // (see AppRuntimeEnvironment.mayAskForPermissions).
+        guard AppRuntimeEnvironment.mayAskForPermissions, !started, !lookingAtFolder else { return }
+        lookingAtFolder = true
+        let folder = ScreenshotLocation.current()
+        ProtectedFolder.touch(folder) { [weak self] in
+            Self.noteAnswered(folder)
+            guard let self else { return }
+            self.lookingAtFolder = false
+            self.answeredFolder = folder
+            self.start()
+        }
+    }
+
+    /// macOS has answered for `folder`, granted or refused: later launches
+    /// may look at it again, and at no other folder (`startAtLaunch`).
+    private static func noteAnswered(_ folder: URL) {
+        Defaults[.screenshotFolderTouched] = true
+        Defaults[.screenshotFolderTouchedPath] = FolderFirstTouch.touchedPath(
+            Defaults[.screenshotFolderTouchedPath], afterAnswerFor: folder)
+    }
+
+    private func start() {
         guard !started else { return }
         started = true
-        // Temporary clipboard screenshots do not outlive the app.
-        TemporaryClipboardShots.removeAll()
+        // Already running since launch, as a rule; once only.
+        startClipboardCollecting()
         store.pruneMissingFiles()
         Defaults.publisher(.enableScreenshotShelf)
             .sink { [weak self] change in self?.setWatching(change.newValue) }
@@ -79,10 +173,34 @@ final class ScreenshotShelfManager: ObservableObject {
         Defaults.publisher(.collectScreenRecordings, options: [])
             .sink { [weak self] _ in self?.setWatching(Defaults[.enableScreenshotShelf]) }
             .store(in: &cancellables)
-        // Clipboard screenshots are collected only while screenshot collecting
-        // is on too. Applied at once here: the combined publisher never
-        // delivered its first value, so the collector never started.
         ClipboardShotLog.note("screenshot manager started")
+        // The screenshot folder can change in System Settings or Screenshot.app,
+        // and a refused folder can be allowed there. Looked at when it can
+        // matter -- another app comes forward (the person was in Settings or
+        // Screenshot.app), the person is back at the Mac, the Clipboard tab
+        // opens -- instead of every 30 s (upstream of this change, the timer
+        // also re-created the Spotlight query each time a folder was refused).
+        NSWorkspace.shared.notificationCenter
+            .publisher(for: NSWorkspace.didActivateApplicationNotification)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.refreshFolderLocation() }
+            .store(in: &cancellables)
+        // Back at the Mac: `refreshOnLook`, subscribed with the clipboard
+        // part, since launch.
+    }
+
+    /// Clipboard screenshots, collected while both switches are on. The
+    /// clipboard is not a folder: nothing here looks at the screenshot
+    /// folder, so this runs from launch. Nothing once started.
+    private func startClipboardCollecting() {
+        guard !clipboardPartStarted else { return }
+        clipboardPartStarted = true
+        // Temporary clipboard screenshots do not outlive the app; their
+        // entries go with them. Only those paths are looked at.
+        TemporaryClipboardShots.removeAll()
+        pruneGoneClipboardShots()
+        // Applied at once: the combined publisher never delivered its first
+        // value, so the collector never started.
         applyClipboardCollecting()
         Defaults.publisher(.collectClipboardScreenshots, options: [])
             .receive(on: DispatchQueue.main)
@@ -92,13 +210,38 @@ final class ScreenshotShelfManager: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in self?.applyClipboardCollecting() }
             .store(in: &cancellables)
-        // The screenshot folder can change in System Settings or Screenshot.app.
-        locationTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                self?.refreshFolder()
-                // Temporary clipboard screenshots last a day at most.
-                if TemporaryClipboardShots.removeExpired() { self?.store.pruneMissingFiles() }
-            }
+        // Back at the Mac: temporary clipboard shots older than a day go,
+        // whether or not the folder was ever asked for (the Settings line
+        // promises a day). One event per return, nothing while idle.
+        ActivityGate.shared.publisher(for: .userPresent)
+            .dropFirst()
+            .filter { $0 }
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.refreshOnLook() }
+            .store(in: &cancellables)
+    }
+
+    /// Drops batch entries of temporary clipboard screenshots whose files
+    /// are gone; saved screenshots are not looked at.
+    private func pruneGoneClipboardShots() {
+        store.pruneMissingFiles(only: { TemporaryClipboardShots.holds(path: $0) })
+    }
+
+    /// The Clipboard tab opened, or the person is back: drop screenshots
+    /// whose files are gone, temporary clipboard ones older than a day
+    /// included, and follow a moved folder. Before the folder was asked
+    /// for, only the temporary clipboard ones are looked at.
+    func refreshOnLook() {
+        TemporaryClipboardShots.removeExpired()
+        if !started { pruneGoneClipboardShots() }
+        refreshFolder()
+    }
+
+    /// Only the folder setting: cheap enough for every app activation.
+    private func refreshFolderLocation() {
+        guard started, Defaults[.enableScreenshotShelf] else { return }
+        if ScreenshotLocation.current() != folder {
+            setWatching(true)
         }
     }
 
@@ -108,7 +251,20 @@ final class ScreenshotShelfManager: ObservableObject {
         watcher?.stop()
         watcher = nil
         guard enabled else { return }
-        folder = ScreenshotLocation.current()
+        let current = ScreenshotLocation.current()
+        if current != answeredFolder, AppRuntimeEnvironment.mayAskForPermissions {
+            // The folder moved (System Settings, Screenshot.app), maybe into
+            // another one macOS guards: the first look there waits for an
+            // answer, so it is taken off the main thread before watching.
+            ProtectedFolder.touch(current) { [weak self] in
+                Self.noteAnswered(current)
+                guard let self else { return }
+                self.answeredFolder = current
+                self.setWatching(Defaults[.enableScreenshotShelf])
+            }
+            return
+        }
+        folder = current
         let watcher = ScreenshotWatcher(folder: folder, startDate: launchDate,
                                         includeRecordings: Defaults[.collectScreenRecordings]) { [weak self] url, date in
             Task { @MainActor in self?.didCapture(url, at: date) }
@@ -120,7 +276,13 @@ final class ScreenshotShelfManager: ObservableObject {
     }
 
     /// Re-reads the screenshot folder and restarts watching when it moved.
+    /// Before start() only the setting is re-read, for Settings to show:
+    /// looking at the folder is what asks for it.
     func refreshFolder() {
+        guard started else {
+            folder = ScreenshotLocation.current()
+            return
+        }
         store.pruneMissingFiles()
         guard Defaults[.enableScreenshotShelf] else { return }
         if ScreenshotLocation.current() != folder || !canReadFolder {
@@ -156,6 +318,11 @@ final class ScreenshotShelfManager: ObservableObject {
         showFlash(for: url)
         // Screenshots live in the Clipboard tab (step D4).
         if Defaults[.openScreenshotsOnNewScreenshot], NotchTabLayout.isVisible(.clipboard) {
+            // Buffer v3: on «Все», where the new batch's film and its key are,
+            // unless «Снимки» is already showing them.
+            let buffer = BufferTabState.shared
+            let segment = BufferLayout.segmentAfterCapture(buffer.segment)
+            if buffer.segment != segment { buffer.segment = segment }
             DynamicIslandViewCoordinator.shared.currentView = .clipboard
         }
     }
@@ -241,6 +408,33 @@ final class ScreenshotShelfManager: ObservableObject {
         finishRemoval(store.clear(batchID: batchID))
     }
 
+    /// The screenshots «Буфер» shows: all of them, or only the clipboard
+    /// ones while the screenshot folder cannot be read.
+    var shownItemIDs: Set<String> {
+        let shown = ScreenshotBatchPanel.visibleBatches(store.batches, onlyClipboardShots: !canReadFolder)
+        return Set(shown.flatMap(\.items).map(\.id))
+    }
+
+    /// The Buffer's trash: the shown screenshots leave «Буфер» at once, and
+    /// stay restorable until `finishTakeOut`.
+    func takeOutShown() -> ScreenshotBatchStore.Removal {
+        let removal = store.takeOut(shownItemIDs)
+        selection.subtract(removal.items.map(\.id))
+        return removal
+    }
+
+    func restore(_ removal: ScreenshotBatchStore.Removal) {
+        store.restore(removal)
+    }
+
+    /// The offer is over: temporary clipboard screenshots go. Saved ones
+    /// only left «Буфер»; their files are never touched from here, whatever
+    /// the Trash setting (that asks first, per batch).
+    func finishTakeOut(_ removal: ScreenshotBatchStore.Removal) {
+        // By the path's text alone: a saved one on the Desktop is never looked at.
+        TemporaryClipboardShots.remove(removal.items.filter { TemporaryClipboardShots.holds(path: $0.path) }.map(\.url))
+    }
+
     /// A removal that would move files to the Trash, waiting for a yes.
     enum PendingRemoval: Equatable {
         case items(Set<String>)
@@ -317,27 +511,39 @@ final class ScreenshotShelfManager: ObservableObject {
     func dragEnded(succeeded: Bool) {
         isDragging = false
         if succeeded, Defaults[.screenshotRemoveAfterDrag] {
-            finishRemoval(store.remove(draggedIDs))
+            // Only the batch forgets them; the files stay. A chat or browser
+            // (Chromium, Electron) gets just the paths at the drop and reads
+            // the files later, at upload or on Send -- deleting or trashing
+            // them here broke the very drop it was counting.
+            let removed = store.remove(draggedIDs)
+            selection.subtract(removed.map(\.id))
         }
         draggedIDs = []
     }
 
     // MARK: - Copy, Finder, Markup
 
-    /// Puts the selected files on the clipboard (paste them into a chat with
-    /// ⌘V); a single screenshot also goes as a picture. Marked as the app's own
-    /// write, so the clipboard history does not record it.
-    func copySelected(to pasteboard: NSPasteboard = .general) {
+    /// Puts the selected screenshots on the clipboard (paste them into a chat
+    /// with ⌘V). Marked as the app's own write, so the clipboard history does
+    /// not record it.
+    @discardableResult
+    func copySelected(to pasteboard: NSPasteboard = .general) -> Task<Int, Never> {
         copy(selectedURLs, to: pasteboard)
     }
 
-    func copy(_ urls: [URL], to pasteboard: NSPasteboard = .general) {
-        guard !urls.isEmpty else { return }
-        ClipboardOwnWrites.write(to: pasteboard) { pasteboard in
-            pasteboard.writeObjects(urls as [NSURL])
-            if urls.count == 1, let image = NSImage(contentsOf: urls[0]) {
-                pasteboard.writeObjects([image])
-            }
+    /// Puts the screenshots on the clipboard, one item each with the file
+    /// and its picture (`ScreenshotPasteboard`). The pictures are read and
+    /// the large ones downscaled off the main thread one at a time, so the
+    /// clipboard is written a moment later; the task answers how many went
+    /// (0 when the files are gone, and then the clipboard is left as it
+    /// was). A newer copy or paste, or a history entry or colour copied
+    /// meanwhile, stops it (`ClipboardPaster.yieldClipboard`).
+    @discardableResult
+    func copy(_ urls: [URL], to pasteboard: NSPasteboard = .general) -> Task<Int, Never> {
+        let urls = ScreenshotPasteboard.existing(urls)
+        return ClipboardPaster.startCopy {
+            guard !urls.isEmpty else { return 0 }
+            return await ScreenshotPasteboard.copy(urls, to: pasteboard)
         }
     }
 
@@ -350,14 +556,30 @@ final class ScreenshotShelfManager: ObservableObject {
 
     /// Copies the batch (or its selected screenshots) and pastes it into
     /// the app the user was working in: one click from screenshots to chat.
+    /// Several go one by one, each with its own ⌘V (Claude, Chrome and
+    /// Telegram attach one picture per paste); one goes as before. The
+    /// clipboard is left holding the last screenshot alone. When none of
+    /// the files is there any more, nothing is closed or pressed
+    /// (`.nothingCopied`). When the target leaves the front or an island
+    /// opens mid-way, the rest are copied together and `onStopped` gets
+    /// their count, for a "press ⌘V" hint.
     @MainActor
     @discardableResult
     func paste(batch: ScreenshotBatch, pasteboard: NSPasteboard = .general, target: NSRunningApplication? = nil,
+               isIslandOpen: @escaping @MainActor () -> Bool = { false },
+               onStopped: @escaping @MainActor (Int) -> Void = { _ in },
                closeIsland: () -> Void) -> ClipboardPaster.Result {
-        let urls = pasteURLs(for: batch)
-        return ClipboardPaster.deliver(target: target, closeIsland: closeIsland) {
-            copy(urls, to: pasteboard)
-        }
+        let urls = ScreenshotPasteboard.existing(pasteURLs(for: batch))
+        return ClipboardPaster.deliverOneByOne(
+            count: urls.count,
+            target: target,
+            isIslandOpen: isIslandOpen,
+            closeIsland: closeIsland,
+            prepare: { await ScreenshotPasteboard.prepare(urls[$0]) },
+            writeOne: { ScreenshotPasteboard.write([$0], to: pasteboard) },
+            writeTogether: { await ScreenshotPasteboard.copy(Array(urls[$0]), to: pasteboard) },
+            onStopped: onStopped
+        )
     }
 
     func reveal(_ urls: [URL]) {

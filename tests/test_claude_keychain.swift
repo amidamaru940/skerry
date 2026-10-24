@@ -2,29 +2,14 @@ import Foundation
 import Security
 import Darwin
 
-// Run scripts/test_claude_keychain.sh on macOS with an unlocked default login Keychain.
-// Uses only UUID-named disposable credentials;
-// it does not read, refresh, or modify any Claude login credential.
+// macOS with an unlocked default login Keychain, from the repository root:
+//   swiftc DynamicIsland/managers/LLMUsage/Quota/KeychainReader.swift tests/test_claude_keychain.swift \
+//     -o "$TMPDIR/test_claude_keychain" && "$TMPDIR/test_claude_keychain"
+// Creates UUID-named disposable items (and removes them); it does not read, refresh,
+// or modify any Claude login credential. Not part of the routine runs: it touches the Keychain.
 @main
 enum ClaudeKeychainTests {
     static func main() throws {
-        if CommandLine.arguments.contains("--closed-pipe") {
-            // Do not inherit an ignored SIGPIPE from a shell or test harness.
-            signal(SIGPIPE, SIG_DFL)
-            let pipe = Pipe()
-            try pipe.fileHandleForReading.close()
-            try require(!ClaudeKeychainStore.writeInput(Data("fake-input".utf8), to: pipe.fileHandleForWriting),
-                        "closed pipe must return failure without terminating the process")
-            return
-        }
-        let child = Process()
-        child.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
-        child.arguments = ["--closed-pipe"]
-        try child.run()
-        child.waitUntilExit()
-        try require(child.terminationReason == .exit && child.terminationStatus == 0,
-                    "closed-pipe subprocess survives with default SIGPIPE handling")
-        print("PASS: closed-pipe write returns failure without SIGPIPE termination")
         try requireLoginKeychain()
 
         let service = "Atoll-keychain-regression-\(UUID().uuidString)"
@@ -44,31 +29,20 @@ enum ClaudeKeychainTests {
         let initialPartitions = try partitionIDs(service: service, account: account)
         try require(initialPartitions.contains("apple-tool:"), "initial Apple tool permission")
 
+        // Non-ASCII, so `security -w` prints it as hexadecimal and read() decodes it.
         let secret = #"{"claudeAiOauth":{"accessToken":"FAKE-not-a-token","refreshToken":"FAKE-refresh","expiresAt":42},"mcpOAuth":{"note":"quotes: \" backslash: \\ unicode: 中文"}}"#
         for cycle in 1...3 {
-            let updated = secret + String(repeating: " ", count: cycle)
-            try require(ClaudeKeychainStore.update(service: service, account: account, secret: updated) == nil, "Atoll write \(cycle)")
-            let actual = ClaudeKeychainStore.read(service: service, account: account)
-            try require(actual == updated, "exact round trip \(cycle)")
-            try require(try partitionIDs(service: service, account: account) == initialPartitions, "partitions survive Atoll write \(cycle)")
-
-            let ownerValue = "fake-owner-refresh-\(cycle)"
+            // Trailing whitespace belongs to the secret and must survive the read.
+            let ownerValue = secret + String(repeating: " ", count: cycle)
             try require(security(["add-generic-password", "-U", "-s", service, "-a", account, "-w", ownerValue]).status == 0,
                     "Claude-style owner write \(cycle)")
-            try require(ClaudeKeychainStore.read(service: service, account: account) == ownerValue, "read owner refresh \(cycle)")
-            try require(try partitionIDs(service: service, account: account) == initialPartitions, "partitions survive owner write \(cycle)")
+            try require(ClaudeKeychainStore.read(service: service, account: account) == ownerValue, "exact read \(cycle)")
+            try require(try partitionIDs(service: service, account: account) == initialPartitions, "partitions survive read \(cycle)")
         }
         try require(ClaudeKeychainStore.read(service: service, account: otherAccount) == "fake-seed", "other account unchanged")
-        try require(ClaudeKeychainStore.update(service: service, account: "missing", secret: "fake") == errSecItemNotFound,
-                "missing account rejected")
-        try require(security(["find-generic-password", "-s", service, "-a", "missing"]).status != 0, "missing account not created")
-        try require(ClaudeKeychainStore.updateCommand(service: service, account: account, secret: String(repeating: "x", count: 4096)) == nil,
-                "oversized input rejected")
-        try require(ClaudeKeychainStore.updateCommand(service: service, account: account, secret: "fake\nadd-generic-password") == nil,
-                "command injection rejected")
-        try require(ClaudeKeychainStore.updateCommand(service: service, account: nil, secret: "fake") == nil,
-                "unscoped update rejected")
-        print("PASS: three Atoll/owner round trips, unchanged partition permissions, exact payload, account isolation, missing/oversized/invalid input")
+        try require(ClaudeKeychainStore.read(service: service, account: "missing") == nil, "missing account reads nothing")
+        try require(ClaudeKeychainStore.read(service: service, account: nil) == nil, "unscoped read rejected")
+        print("PASS: three owner writes read back exactly, unchanged partition permissions, account isolation, missing/unscoped reads")
     }
 
     /// Refuses unavailable or locked test environments before creating any item.

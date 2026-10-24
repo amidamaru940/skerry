@@ -19,10 +19,10 @@
 import AppKit
 import UniformTypeIdentifiers
 
-/// A clipboard picture being dragged out: the PNG itself for apps that take
-/// pictures (chats, Mail), and a file promise for Finder and other folders, so
-/// the file is written only where the picture was dropped. No temporary copy
-/// is made anywhere.
+/// A clipboard picture dragged out when its temporary file could not be
+/// written: the PNG itself, and a file promise for Finder and other folders.
+/// Chromium and Electron windows accept neither, so this is only a fallback
+/// (ClipboardDragWriters writes a real file first).
 final class ClipboardImagePromiseProvider: NSFilePromiseProvider, NSFilePromiseProviderDelegate {
     let pngData: Data
     let fileName: String
@@ -69,7 +69,21 @@ enum ClipboardDragWriters {
             let png = isPNG ? data : (NSBitmapImageRep(data: data)?.representation(using: .png, properties: [:]) ?? data)
             let stamp = now.formatted(.iso8601.year().month().day().time(includingFractionalSeconds: false))
                 .replacingOccurrences(of: ":", with: ".")
-            return [ClipboardImagePromiseProvider(pngData: png, fileName: "Clipboard Image \(stamp).png")]
+            let name = "Clipboard Image \(stamp).png"
+            // A real file. Chats and browsers (Chromium, Electron) take a
+            // dropped picture only as a file: a file promise or bare PNG data
+            // reached them as nothing, while Finder fulfilled the promise --
+            // so a picture had to go to the Desktop first and on from there
+            // (21.10). The file lives with the clipboard screenshots in the
+            // temporary folder, emptied at launch, at quit and after a day.
+            // The PNG rides along for apps that take the picture itself.
+            if let url = temporaryFile(png: png, named: name) {
+                let pasteboardItem = NSPasteboardItem()
+                pasteboardItem.setString(url.absoluteString, forType: .fileURL)
+                pasteboardItem.setData(png, forType: .png)
+                return [pasteboardItem]
+            }
+            return [ClipboardImagePromiseProvider(pngData: png, fileName: name)]
         case .file:
             return (item.fileURLs ?? []).compactMap { URL(string: $0) as NSURL? }
         case .url:
@@ -84,6 +98,25 @@ enum ClipboardDragWriters {
             if item.type == .rtf, let rtf = item.rtfData { pasteboardItem.setData(rtf, forType: .rtf) }
             pasteboardItem.setString(text, forType: .string)
             return [pasteboardItem]
+        }
+    }
+
+    /// Writes a dragged picture to `folder` under `name` (" 2", " 3"... when
+    /// taken): a file being uploaded from an earlier drop is never replaced.
+    static func temporaryFile(png: Data, named name: String, folder: URL = TemporaryClipboardShots.folder) -> URL? {
+        do {
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            let base = (name as NSString).deletingPathExtension
+            var url = folder.appendingPathComponent(name)
+            var copy = 2
+            while FileManager.default.fileExists(atPath: url.path) {
+                url = folder.appendingPathComponent("\(base) \(copy).png")
+                copy += 1
+            }
+            try png.write(to: url, options: .withoutOverwriting)
+            return url
+        } catch {
+            return nil
         }
     }
 }

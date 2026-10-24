@@ -183,6 +183,10 @@ final class ScreenshotDragSourceView: NSView, NSDraggingSource {
         .copy
     }
 
+    /// Copy whatever keys are held: with ⌘ or ⌃ down the copy-only mask would
+    /// otherwise become empty and every destination would refuse the drop.
+    func ignoreModifierKeys(for session: NSDraggingSession) -> Bool { true }
+
     func draggingSession(_ session: NSDraggingSession, willBeginAt screenPoint: NSPoint) {
         onDragBegan?(draggedURLs)
     }

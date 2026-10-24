@@ -39,18 +39,21 @@ struct DoNotDisturbLiveActivity: View {
     }
 
     var body: some View {
+        let geometry = closedGeometry
         HStack(spacing: 0) {
             iconWing
-                .frame(width: iconWingWidth, height: wingHeight)
+                .frame(width: geometry.leadingWing, height: ClosedWingE.content, alignment: .leading)
+                .offset(x: -ClosedWingE.outset)
 
             Rectangle()
                 .fill(Color.black)
-                .frame(width: centerSegmentWidth)
+                .frame(width: geometry.middle)
 
             labelWing
-                .frame(width: labelWingWidth, height: wingHeight)
+                .frame(width: geometry.trailingWing, height: ClosedWingE.content, alignment: .trailing)
+                .offset(x: ClosedWingE.outset)
         }
-        .frame(width: notchEnvelopeWidth, height: vm.effectiveClosedNotchHeight)
+        .frame(width: geometry.width, height: vm.effectiveClosedNotchHeight)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(accessibilityDescription)
         .onAppear(perform: handleInitialState)
@@ -60,7 +63,52 @@ struct DoNotDisturbLiveActivity: View {
         .onDisappear(perform: cancelPendingTasks)
     }
 
-    // MARK: - Layout helpers
+    // MARK: - Layout (E §2.1, sheet S29)
+
+    /// The Focus glyph's box in the leading wing.
+    static let glyphWidth: CGFloat = ClosedWingE.content
+
+    /// The name's width in the trailing wing: its own, up to the cap.
+    static func labelWidth(_ label: String) -> CGFloat {
+        min(ClosedWingE.measure(label), ClosedWingE.textCap)
+    }
+
+    /// The glyph flush left in the leading wing, the name flush right in the
+    /// trailing one, after the camera; both wings as wide as the wider. The
+    /// old row gave the name a wider wing than the glyph, so the island,
+    /// centred on the camera, slid the name in under it.
+    static func closedGeometry(
+        closedNotchWidth: CGFloat,
+        middle: CGFloat? = nil,
+        showsGlyph: Bool,
+        label: String?
+    ) -> ClosedWingGeometry {
+        ClosedWingGeometry.equalWings(
+            closedNotchWidth: closedNotchWidth,
+            middle: middle,
+            leading: showsGlyph ? glyphWidth : 0,
+            trailing: label.map(labelWidth) ?? 0
+        )
+    }
+
+    private var showsGlyph: Bool {
+        isExpanded || showInactiveIcon
+    }
+
+    private var closedGeometry: ClosedWingGeometry {
+        let label = shouldShowLabel ? labelText : nil
+        // A brief toast that has folded its wings shrinks to the idle width,
+        // so the hand-over to the idle island does not jump.
+        let middle = focusToastMode && !showsGlyph && label == nil
+            ? collapsedToastBaseWidth
+            : collapsedNotchWidth
+        return Self.closedGeometry(
+            closedNotchWidth: vm.closedNotchSize.width,
+            middle: middle,
+            showsGlyph: showsGlyph,
+            label: label
+        )
+    }
 
     private var collapsedNotchWidth: CGFloat {
         let width = currentClosedNotchWidth
@@ -86,34 +134,6 @@ struct DoNotDisturbLiveActivity: View {
         return NSScreen.main
     }
 
-    private var wingHeight: CGFloat {
-        max(vm.effectiveClosedNotchHeight - 10, 20)
-    }
-
-    private var iconWingWidth: CGFloat {
-        (isExpanded || showInactiveIcon) ? minimalWingWidth : 0
-    }
-
-    private var labelWingWidth: CGFloat {
-        guard shouldShowLabel else {
-            return focusToastMode ? 0 : ((isExpanded || showInactiveIcon) ? minimalWingWidth : 0)
-        }
-
-        if focusToastMode {
-            return max(labelIntrinsicWidth + 26, minimalWingWidth)
-        }
-
-        return max(desiredLabelWidth, minimalWingWidth)
-    }
-
-    private var notchEnvelopeWidth: CGFloat {
-        centerSegmentWidth + iconWingWidth + labelWingWidth
-    }
-
-    private var minimalWingWidth: CGFloat {
-        max(vm.effectiveClosedNotchHeight - 12, 24)
-    }
-
     private var closedNotchContentInset: CGFloat {
         cornerRadiusInsets.closed.top + cornerRadiusInsets.closed.bottom
     }
@@ -122,55 +142,8 @@ struct DoNotDisturbLiveActivity: View {
         max(0, collapsedNotchWidth - closedNotchContentInset)
     }
 
-    private var centerSegmentWidth: CGFloat {
-        if focusToastMode && iconWingWidth == 0 && labelWingWidth == 0 {
-            return collapsedToastBaseWidth
-        }
-        return collapsedNotchWidth
-    }
-
-    private var desiredLabelWidth: CGFloat {
-        let fallbackWidth = max(collapsedNotchWidth * 0.52, 136)
-        var width = fallbackWidth
-
-        if focusMode == .doNotDisturb && shouldShowLabel {
-            width = max(width, 164)
-        }
-
-        if !shouldMarqueeLabel {
-            width = max(width, labelIntrinsicWidth + 8)
-        }
-
-        return width
-    }
-
     private var shouldShowLabel: Bool {
         focusToastMode ? (isExpanded && !labelText.isEmpty) : (showLabelSetting && isExpanded && !labelText.isEmpty)
-    }
-
-    private var labelIntrinsicWidth: CGFloat {
-        guard !labelText.isEmpty else { return 0 }
-        return (labelText as NSString).size(withAttributes: [.font: focusLabelNSFont]).width
-    }
-
-    private var shouldMarqueeLabel: Bool {
-        shouldShowLabel && labelIntrinsicWidth > focusLabelBaselineWidth
-    }
-
-    private var marqueeFrameWidth: CGFloat {
-        max(48, labelWingWidth - 8)
-    }
-
-    private var focusLabelFont: Font {
-        .system(size: 12, weight: .semibold, design: .rounded)
-    }
-
-    private var focusLabelNSFont: NSFont {
-        NSFont.systemFont(ofSize: 12, weight: .semibold)
-    }
-
-    private var focusLabelBaselineWidth: CGFloat {
-        FocusLabelMetrics.baselineWidth
     }
 
     // MARK: - Focus metadata
@@ -269,45 +242,30 @@ struct DoNotDisturbLiveActivity: View {
 
     private var iconWing: some View {
         Color.clear
-            .overlay(alignment: .center) {
-                if iconWingWidth > 0 {
+            .overlay(alignment: .leading) {
+                if showsGlyph {
                     currentIcon
-                        .font(.system(size: 13, weight: .semibold))
+                        .font(DSE.Typeface.glyphClosed)
                         .foregroundColor(currentIconColor)
                         .contentTransition(.opacity)
                         .scaleEffect(iconScale)
                         .animation(.none, value: iconScale)
+                        .frame(width: Self.glyphWidth, height: ClosedWingE.content)
                 }
             }
-            .animation(.smooth(duration: 0.3), value: iconWingWidth)
+            .animation(.smooth(duration: 0.3), value: showsGlyph)
     }
 
     private var labelWing: some View {
         Color.clear
             .overlay(alignment: .trailing) {
                 if shouldShowLabel {
-                    Group {
-                        if shouldMarqueeLabel {
-                            MarqueeText(
-                                .constant(labelText),
-                                font: focusLabelFont,
-                                nsFont: .caption1,
-                                textColor: labelColor,
-                                minDuration: 0.4,
-                                frameWidth: marqueeFrameWidth
-                            )
-                            .frame(width: marqueeFrameWidth, alignment: .trailing)
-                        } else {
-                            Text(labelText)
-                                .font(focusLabelFont)
-                                .foregroundColor(labelColor)
-                                .lineLimit(1)
-                                .minimumScaleFactor(0.8)
-                                .contentTransition(.opacity)
-                                .frame(maxWidth: .infinity, alignment: .trailing)
-                        }
-                    }
-                    .padding(.horizontal, 4)
+                    ClosedWingText(
+                        text: labelText,
+                        width: ClosedWingE.measure(labelText),
+                        color: labelColor
+                    )
+                    .contentTransition(.opacity)
                 }
             }
             .animation(.smooth(duration: 0.3), value: shouldShowLabel)
@@ -517,17 +475,4 @@ private final class SymbolAvailabilityCache {
         lock.unlock()
         return available
     }
-}
-
-private enum FocusLabelMetrics {
-    static let baselineText = "Do Not Disturb"
-
-    static let baselineWidth: CGFloat = {
-        #if canImport(AppKit)
-        let font = NSFont.systemFont(ofSize: 12, weight: .semibold)
-        return (baselineText as NSString).size(withAttributes: [.font: font]).width
-        #else
-        return 0
-        #endif
-    }()
 }

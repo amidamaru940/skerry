@@ -74,13 +74,21 @@ struct MusicOnlyHold {
         settling.map { $0.since.addingTimeInterval(Self.limit(for: $0.reason)) }
     }
 
-    /// A video with no track details: a title and a length, but no artist and
-    /// no album.
+    /// Reels and Shorts run up to 3 minutes; 5 leaves a margin. A video
+    /// without track details that is longer is one being watched (an episode on a series site, a
+    /// film): it is shown and its controls work. Every such site was held
+    /// like a Reel, so the island only controlled YouTube, whose channel name
+    /// counts as an artist (23.10).
+    static let shortVideoLimit: TimeInterval = 300
+
+    /// A short video with no track details: a title and a length under
+    /// `shortVideoLimit`, but no artist and no album.
     static func isUntitledVideo(_ state: PlaybackState) -> Bool {
         !isBlank(state.title)
             && isBlank(state.artist)
             && isBlank(state.album)
             && state.duration > 0
+            && state.duration < shortVideoLimit
             && !musicApps.contains(state.bundleIdentifier)
     }
 
@@ -91,7 +99,9 @@ struct MusicOnlyHold {
     static func isHalfArrivedSwitch(_ state: PlaybackState, from previous: PlaybackState) -> Bool {
         state.bundleIdentifier == previous.bundleIdentifier
             && state.title != previous.title
-            && !isBlank(previous.artist)
+            // An episode has no artist, but its length tells a Reel's title
+            // arriving over it from the episode itself.
+            && (!isBlank(previous.artist) || previous.duration >= shortVideoLimit)
             && state.artist == previous.artist
             && state.album == previous.album
             && state.duration == previous.duration

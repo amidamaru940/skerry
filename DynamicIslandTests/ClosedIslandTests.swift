@@ -17,18 +17,20 @@
  */
 
 @testable import Atoll
+import AppKit
 import CoreGraphics
 import Defaults
 import XCTest
 
-/// Step D2: opening from the ears, symmetric wings, the shelf flash, Keep
-/// Awake in the closed island, Compact instead of the minimalistic mode.
+/// Step D2: the click area (the hover ears were removed for energy),
+/// symmetric wings, the shelf flash, Keep Awake in the closed island,
+/// Compact instead of the minimalistic mode.
 final class ClosedIslandTests: XCTestCase {
     // A 1512 × 982 screen with a 200 × 32 notch in the middle.
     private let screen = CGRect(x: 0, y: 0, width: 1512, height: 982)
     private var notch: CGRect { IslandHoverZone.notchRect(screenFrame: screen, width: 200, height: 32) }
 
-    // MARK: Hover ears
+    // MARK: Hover and click area
 
     func testTheNotchHangsFromTheTopEdgeInTheMiddle() {
         XCTAssertEqual(notch, CGRect(x: 656, y: 950, width: 200, height: 32))
@@ -36,40 +38,26 @@ final class ClosedIslandTests: XCTestCase {
         XCTAssertEqual(shifted.minX, 696)
     }
 
-    func testThePointerOpensTheIslandFromAnEarBesideTheNotch() {
-        let zone = IslandHoverZone.zone(around: notch)
-        // In the menu bar 25 pt left of the notch and 25 pt right of it.
-        XCTAssertTrue(IslandHoverZone.contains(zone, CGPoint(x: notch.minX - 25, y: 975)))
-        XCTAssertTrue(IslandHoverZone.contains(zone, CGPoint(x: notch.maxX + 25, y: 975)))
-        // Exactly at the ear's edge and on the top pixel still count.
-        XCTAssertTrue(IslandHoverZone.contains(zone, CGPoint(x: notch.minX - 28, y: 982)))
-        // Past the ear: an ordinary menu bar item.
-        XCTAssertFalse(IslandHoverZone.contains(zone, CGPoint(x: notch.minX - 30, y: 975)))
-        XCTAssertFalse(IslandHoverZone.contains(zone, CGPoint(x: notch.maxX + 30, y: 975)))
-    }
-
-    func testTheZoneReachesSixPointsBelowTheNotch() {
-        let zone = IslandHoverZone.zone(around: notch)
-        XCTAssertTrue(IslandHoverZone.contains(zone, CGPoint(x: notch.midX, y: notch.minY - 5)))
-        XCTAssertFalse(IslandHoverZone.contains(zone, CGPoint(x: notch.midX, y: notch.minY - 7)))
-    }
-
-    func testAClickOpensOnlyOnTheIslandNotInAnEar() {
+    func testTheClickAreaReachesSixPointsBelowTheNotch() {
         let click = IslandHoverZone.clickArea(around: notch)
-        XCTAssertTrue(IslandHoverZone.contains(click, CGPoint(x: notch.minX - 11, y: 975)), "upstream's 12 pt margin")
-        XCTAssertFalse(IslandHoverZone.contains(click, CGPoint(x: notch.minX - 20, y: 975)), "the ear is the menu bar's")
+        XCTAssertTrue(IslandHoverZone.contains(click, CGPoint(x: notch.midX, y: notch.minY - 5)))
+        XCTAssertFalse(IslandHoverZone.contains(click, CGPoint(x: notch.midX, y: notch.minY - 7)))
+    }
+
+    func testAClickOpensOnlyOnTheIslandNotBesideIt() {
+        let click = IslandHoverZone.clickArea(around: notch)
+        XCTAssertTrue(IslandHoverZone.contains(click, CGPoint(x: notch.minX, y: 975)), "the island's edge")
+        XCTAssertTrue(IslandHoverZone.contains(click, CGPoint(x: notch.maxX, y: 975)), "the island's edge")
+        // A menu title flush against the camera is the menu bar's: upstream's
+        // 12 pt margin beside the notch is gone.
+        XCTAssertFalse(IslandHoverZone.contains(click, CGPoint(x: notch.minX - 1, y: 975)), "the menu bar's")
+        XCTAssertFalse(IslandHoverZone.contains(click, CGPoint(x: notch.minX - 11, y: 975)), "the menu bar's")
+        XCTAssertFalse(IslandHoverZone.contains(click, CGPoint(x: notch.maxX + 11, y: 975)), "the menu bar's")
+        // Below the notch, where there is no menu, the strip stays.
+        XCTAssertEqual(click, CGRect(x: notch.minX, y: notch.minY - IslandHoverZone.below, width: notch.width, height: notch.height + IslandHoverZone.below))
         XCTAssertFalse(IslandHoverZone.clickOpens(onNotch: false, overIsland: false))
         XCTAssertTrue(IslandHoverZone.clickOpens(onNotch: true, overIsland: false))
         XCTAssertTrue(IslandHoverZone.clickOpens(onNotch: false, overIsland: true))
-    }
-
-    func testHoverStartsInTheZoneAndEndsOnlyOffTheZoneAndTheIsland() {
-        XCTAssertEqual(IslandHoverZone.change(inZone: true, overIsland: false, isHovering: false), .enter)
-        XCTAssertEqual(IslandHoverZone.change(inZone: true, overIsland: false, isHovering: true), .none)
-        XCTAssertEqual(IslandHoverZone.change(inZone: false, overIsland: false, isHovering: true), .exit)
-        XCTAssertEqual(IslandHoverZone.change(inZone: false, overIsland: false, isHovering: false), .none)
-        // A wide music wing reaches past the ears: still hovering there.
-        XCTAssertEqual(IslandHoverZone.change(inZone: false, overIsland: true, isHovering: true), .none)
     }
 
     // MARK: Symmetric wings
@@ -82,6 +70,132 @@ final class ClosedIslandTests: XCTestCase {
         let left = IslandWings.symmetricWidth(left: 20, right: 151)
         let total = left + 200 + 151
         XCTAssertEqual(left + 100, total / 2)
+    }
+
+    // MARK: Nothing behind the camera
+
+    /// Every closed state with text, at the longest strings it shows, on a
+    /// 185 pt notch (14" MacBook Pro) and a 200 pt one: the trailing content
+    /// starts at or past the camera's right edge, and the leading content
+    /// ends at or before its left edge (E §2.1).
+    func testNoClosedTextSitsBehindTheCamera() {
+        for notch: CGFloat in [185, 200] {
+            var states: [(String, ClosedWingGeometry)] = []
+
+            // Focus (S29): the owner's «Не беспокоить», a custom name past the cap, the toast.
+            for label in ["Не беспокоить", "Do Not Disturb", "Фокус выключен", "Работа над очень длинным проектом", "On"] {
+                states.append(("Focus «\(label)»", DoNotDisturbLiveActivity.closedGeometry(closedNotchWidth: notch, showsGlyph: true, label: label)))
+            }
+            states.append(("Focus, glyph only", DoNotDisturbLiveActivity.closedGeometry(closedNotchWidth: notch, showsGlyph: true, label: nil)))
+
+            // Caps Lock, AirPods and the other text HUDs.
+            func hud(
+                _ type: SneakContentType,
+                listening: String? = nil,
+                battery: Bool = false,
+                deviceName: Bool = false,
+                percentage: Bool = false,
+                capsLabel: Bool = true
+            ) -> ClosedWingGeometry {
+                let wings = InlineHUD.textWings(
+                    type: type,
+                    listeningModeLabel: listening,
+                    hasBatteryLevel: battery,
+                    showsDeviceName: deviceName,
+                    circularBattery: false,
+                    showsBatteryPercentage: percentage,
+                    showsCapsLockLabel: capsLabel,
+                    gestureProgress: 0
+                )
+                return .equalWings(closedNotchWidth: notch, leading: wings.info, trailing: wings.trailing)
+            }
+            states.append(("Caps Lock", hud(.capsLock)))
+            states.append(("Caps Lock, glyph only", hud(.capsLock, capsLabel: false)))
+            for mode in ["Распознавание разговора", "Conversation Awareness", "Шумоподавление"] {
+                states.append(("AirPods «\(mode)»", hud(.bluetoothAudio, listening: mode)))
+            }
+            states.append(("AirPods name and battery", hud(.bluetoothAudio, battery: true, deviceName: true, percentage: true)))
+            states.append(("AirPods battery", hud(.bluetoothAudio, battery: true, percentage: true)))
+
+            // Battery (S14–S16).
+            for title in ["Полный заряд", "Низкий заряд", "Полностью заряжена", "Fully charged"] {
+                states.append(("Battery «\(title)»", BatteryTemporaryActivityView.compactGeometry(title: title, closedNotchWidth: notch)))
+            }
+
+            // Keep Awake (S23–S24), colour copied (S27), screenshot flash (S17).
+            for label in ["∞", "14:55", "1:02:03"] {
+                states.append(("Keep Awake «\(label)»", KeepAwakeLiveActivity.closedGeometry(closedNotchWidth: notch, label: label)))
+            }
+            states.append(("Colour copied", ColorPickedLiveActivityContent.closedGeometry(closedNotchWidth: notch, hex: "#5BBEEB")))
+            for count in [1, 3, 25, 99] {
+                states.append(("Screenshot flash \(count)", ClosedScreenshotFlash.closedGeometry(closedNotchWidth: notch, count: count)))
+            }
+
+            // Timer (S8–S10): a long name in the leading wing, an hour on the clock.
+            let name = min(max(ClosedWingE.measure("Очень длинное название таймера", font: .systemFont(ofSize: 12, weight: .medium)), 44), 220)
+            let countdown = ClosedWingE.measure("1:00:00", font: .monospacedSystemFont(ofSize: 13, weight: .semibold))
+            states.append(("Timer", TimerLiveActivity.closedGeometry(
+                closedNotchWidth: notch,
+                middle: notch,
+                leftWing: 28 + 11 + 8 + name + 18,
+                rightWing: 22 + max(countdown + 16, 72)
+            )))
+
+            // Reminder (S33): «in 120 min» beside the 26 pt glyph.
+            let minutes = ClosedWingE.measure("in 120 min", font: .systemFont(ofSize: 13, weight: .semibold))
+            states.append(("Reminder", ReminderLiveActivity.closedGeometry(closedNotchWidth: notch, leftWing: 16 + 26, rightWing: 16 + max(minutes + 18, 88))))
+
+            // Recording (S26): an hour, and «Ошибка», scaled into their wing.
+            for text in ["1:02:03", "Ошибка"] {
+                let width = ClosedWingE.measure(text, font: .monospacedDigitSystemFont(ofSize: 14, weight: .semibold))
+                states.append(("Recording «\(text)»", RecordingLiveActivity.closedGeometry(
+                    closedNotchWidth: notch,
+                    hudWidth: notch + RecordingHUDPresentation.compact.extraWidth,
+                    centerWidth: notch,
+                    textWidth: width
+                )))
+            }
+
+            // Download (S34) with its rate, and an extension's widest value.
+            states.append(("Download", DownloadLiveActivity.closedGeometry(
+                closedNotchWidth: notch,
+                notchHeight: 32,
+                isHovering: false,
+                gestureProgress: 0,
+                isDownloading: true,
+                speedText: "1023.5 MB/s"
+            )))
+            let extensionValue = 44 + notch * 0.6
+            let layout = ExtensionStandaloneLayout.equalWings(
+                outerHeight: 32,
+                contentHeight: 20,
+                leadingContentWidth: 44,
+                centerWidth: notch,
+                trailingContentWidth: extensionValue
+            )
+            states.append(("Extension", layout.closedGeometry(closedNotchWidth: notch, trailingContent: extensionValue)))
+
+            for (state, geometry) in states {
+                if geometry.trailingContent > 0 {
+                    XCTAssertGreaterThanOrEqual(
+                        geometry.trailingContentMinX, geometry.cameraMaxX,
+                        "\(state), notch \(notch): the trailing content starts under the camera"
+                    )
+                }
+                XCTAssertTrue(geometry.clearsCamera, "\(state), notch \(notch)")
+            }
+        }
+
+        // The row the owner saw (22.10): a 20 pt glyph wing beside a 164 pt
+        // name wing slid «Не беспокоить» in to 26 pt right of the camera's centre.
+        let before = ClosedWingGeometry(leadingWing: 20, middle: 185, trailingWing: 164, leadingContent: 20, trailingContent: 160, camera: 181)
+        XCTAssertLessThan(before.trailingContentMinX, before.cameraMaxX)
+        XCTAssertFalse(before.clearsCamera)
+        // Now: both wings 98, the name from 92.5, past the camera's 90.5.
+        let focus = DoNotDisturbLiveActivity.closedGeometry(closedNotchWidth: 185, showsGlyph: true, label: "Не беспокоить")
+        XCTAssertEqual(focus.leadingWing, focus.trailingWing)
+        XCTAssertGreaterThanOrEqual(focus.trailingContentMinX, 92.5)
+        XCTAssertLessThanOrEqual(DoNotDisturbLiveActivity.labelWidth("Работа над очень длинным проектом и ещё немного"), ClosedWingE.textCap)
     }
 
     // MARK: Shelf flash

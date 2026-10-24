@@ -51,6 +51,9 @@ class DynamicIslandWindow: NSPanel {
         titleVisibility = .hidden
         titlebarAppearsTransparent = true
         backgroundColor = .clear
+        // The island is black whatever the system appearance: with macOS in
+        // Light mode, views using .primary/.secondary drew dark text on it.
+        appearance = NSAppearance(named: .darkAqua)
         isMovable = false
         
         collectionBehavior = Self.pinnedCollectionBehavior
@@ -153,15 +156,45 @@ class DynamicIslandWindow: NSPanel {
             .sink { [weak self] _ in self?.returnKeyboardIfNeeded() }
     }
 
+    /// Hands the keyboard back now from every island that holds it: a paste
+    /// presses ⌘V right after the island closes. Also while Skerry is active
+    /// (Settings open): the paste then activates its target, and the island
+    /// must not stay key behind it.
+    static func returnKeyboardFromIslands() {
+        for case let island as DynamicIslandWindow in NSApp.windows {
+            island.returnKeyboardIfNeeded(evenWhileActive: true)
+        }
+    }
+
+    /// The island is out for a moment to give the keyboard back, and comes
+    /// back in on the next turn unless something hid it meanwhile.
+    private var keyboardReturnPending = false
+
+    override func close() {
+        keyboardReturnPending = false
+        super.close()
+    }
+
     /// A non-activating panel keeps the keyboard after it closes, so typing
     /// would go nowhere until the user clicks their app. Ordering the island
-    /// out and straight back in hands the keyboard back to the app in front
-    /// without activating anything. Not while Skerry itself is active
-    /// (Settings, the terminal), where AppKit handles focus.
-    private func returnKeyboardIfNeeded() {
-        guard isKeyWindow, isVisible, !NSApp.isActive else { return }
+    /// out and back in hands the keyboard back to the app in front without
+    /// activating anything. Back in on the next turn: out and in within one
+    /// turn, the window server saw no change and the island kept the
+    /// keyboard, so «Вставить в Claude» closed the island and pasted nothing
+    /// (23.10). Not while Skerry itself is active (Settings, the terminal),
+    /// where AppKit handles focus.
+    private func returnKeyboardIfNeeded(evenWhileActive: Bool = false) {
+        guard isKeyWindow, isVisible, evenWhileActive || !NSApp.isActive else { return }
         makeFirstResponder(nil)
         orderOut(nil)
-        orderFrontRegardless()
+        keyboardReturnPending = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.keyboardReturnPending else { return }
+            self.keyboardReturnPending = false
+            // The lock screen hides the island with alpha 0 and orderOut; a
+            // lock that came in meanwhile keeps it hidden.
+            guard !self.isVisible, self.alphaValue > 0 else { return }
+            self.orderFrontRegardless()
+        }
     }
 }

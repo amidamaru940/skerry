@@ -272,10 +272,26 @@ struct TimerLiveActivity: View {
         .contentShape(Rectangle())
     }
 
+    /// Equal wings (E §2.1): the island is centred on the camera, so a
+    /// leading wing wider than the trailing one (a long timer name) slid the
+    /// name in under the camera. Each side keeps its content flush to its wall.
+    static func closedGeometry(closedNotchWidth: CGFloat, middle: CGFloat, leftWing: CGFloat, rightWing: CGFloat) -> ClosedWingGeometry {
+        ClosedWingGeometry.equalWings(closedNotchWidth: closedNotchWidth, middle: middle, leading: leftWing, trailing: rightWing)
+    }
+
+    private var closedWingWidth: CGFloat {
+        Self.closedGeometry(
+            closedNotchWidth: vm.closedNotchSize.width,
+            middle: middleSectionWidth,
+            leftWing: leftWingWidth,
+            rightWing: rightWingWidth
+        ).wing
+    }
+
     @ViewBuilder
     private func leftWingView() -> some View {
         Color.clear
-            .frame(width: leftWingWidth, height: notchContentHeight)
+            .frame(width: closedWingWidth, height: notchContentHeight)
             .background(alignment: .leading) {
                 HStack(spacing: showsInfoSection ? 8 : 0) {
                     iconSection
@@ -298,7 +314,7 @@ struct TimerLiveActivity: View {
     @ViewBuilder
     private func rightWingView() -> some View {
         Color.clear
-            .frame(width: rightWingWidth, height: notchContentHeight)
+            .frame(width: closedWingWidth, height: notchContentHeight)
             .background(alignment: .trailing) {
                 HStack(spacing: 0) {
                     if ringOnRight {

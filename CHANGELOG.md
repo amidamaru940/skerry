@@ -5,6 +5,71 @@ All notable changes to Skerry are documented here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). For the history
 before the fork, see [Atoll's changelog](https://github.com/Ebullioscopic/Atoll/blob/dev/CHANGELOG.md).
 
+## [1.1.7] — 2026-10-23
+
+### Added
+- **A trash in "Buffer".** A small trash beside pause clears what the filter shows: on "All" the copies and the screenshots, on "Shots" the screenshots, on "Text", "Links" and "Files" those copies. Pinned copies stay, and "Cleared · N — Undo" puts everything back for 5 seconds. Clipboard screenshots are then deleted; saved screenshots only leave "Buffer", their files are not touched. "Clear" in the "…" menu does the same.
+
+### Fixed
+- **"Clear History" seemed to do nothing** when "Buffer" held only screenshots: it cleared the copies alone.
+
+## [1.1.6] — 2026-10-23
+
+### Fixed
+- **Videos on any site, not only YouTube.** A video that reports no artist (an episode on a series site, a film) was treated like an Instagram Reel: hidden, with the music kept on screen and the controls on hold. Only short clips (under 5 minutes) are held now; longer videos show on the island and its buttons control them.
+- **"Resume" no longer looks live when it can't work.** While a video in the browser holds the system's controls, the paused-track strip on "Now" dims "Resume" and says "Controls are with a video in …", as the player already did; before, the button silently did nothing.
+
+## [1.1.5] — 2026-10-23
+
+### Fixed
+- **A crash while screenshots came into the open "Buffer".** SwiftUI resized the island's window on its own while Skerry set its size too, and the two re-entered AppKit's layout until it threw. 1.1.2 had removed only part of this. The island and the picture preview are now sized by Skerry alone.
+- **The picture preview was empty since 1.1.2.** Resting the pointer on a picture in "Buffer" opened a preview with no size; it shows the picture again.
+
+## [1.1.4] — 2026-10-23
+
+### Fixed
+- **"Paste into Claude · N" closed the island and pasted nothing.** The closed island kept the keyboard, so the paste stopped before its first ⌘V (it never pastes into the island). The island now hands the keyboard back to the app in front as it closes.
+- **The "where to" list held a macOS prompt.** The window asking for Accessibility after a reinstall came forward and became a paste target; its ⌘V only beeped. Only apps with a Dock icon are remembered now.
+- **"Buffer" cut off on the first open, whole on the second.** With copies in the history, the island measured only the copies and not the film above them, so it grew too little and stayed cut until reopened. It now grows to the film and the copies at once.
+
+## [1.1.3] — 2026-10-23
+
+### Fixed
+- **"Buffer" cut off with the paste key missing.** After the island had shrunk to "No copies yet", a new screenshot batch appeared above it but the island did not grow back, so the film was cut and "Paste into … · N" sat below the edge. The Buffer now grows when its content runs past the island.
+
+## [1.1.2] — 2026-10-23
+
+### Fixed
+- A rare crash while the island or a picture preview resized itself (AppKit's layout loop in a SwiftUI window); the island and the preview panel are now sized only by Skerry.
+
+## [1.1.1]
+
+### Fixed
+- **Pasting a batch into Claude, Chrome or Telegram.** "Paste into … · 3" did not always paste every shot there. Each shot now goes in as a picture, one after another, so all three arrive. If another app comes forward or the island opens mid-way, pasting stops and the rest are copied for your own ⌘V; copying something else stops it too.
+- **Clipboard screenshots from the first launch.** Screenshots taken to the clipboard (⌃⇧⌘4) were collected only after the screenshot folder had been asked for, so with "Skip" on the first launch they were lost. They are now collected from launch, need no folder, and expire within a day even if the folder was never asked for.
+- **"Do Not Disturb" no longer hides under the camera.** The closed island gives the moon and the Focus name equal wings, so the name starts after the camera; a long name fades at 150 pt. Battery, AirPods, timer, reminder, recording and extension indicators got equal wings too.
+
+### Changed
+- **Clipboard screenshots are now collected by default**, also after updating from 1.1.0. Screenshots taken to the clipboard (⌃⇧⌘4) are kept only as files in a local temporary folder, so they can be pasted or dragged as a batch, and are deleted within a day. Turn this off in Settings → Screenshots → "Also collect clipboard screenshots".
+- **Pictures you can tell apart.** A picture in "All" shows a larger thumbnail with its size, and the pointer resting on it opens a preview beside the island that never takes the keyboard. VoiceOver reads where the picture came from and when.
+- Without access to the screenshot folder, "Screenshots" still shows the clipboard screenshots.
+- Turning on only the clipboard screenshots no longer asks for the Desktop folder.
+- "Nothing to paste: the shots are gone" when a batch's files are gone.
+
+## [1.1.0]
+
+### Changed
+- **A new look for the island** (concept E, "edge of light"): the closed island, "Now" and "Buffer" are a black body without grey plates; colour comes only as light from what is shown.
+- **"Buffer" v3:** filters as words, a film of screenshots with one "Paste into … · N" key, the history in two columns, deleting with "Undo". Every function of the previous tab is kept.
+- **The menu bar stays free.** The open island leaves the other apps' menus uncovered: only a neck over the camera, the panel below. It opens on hover at once.
+- **A full-screen film leaves the island empty.**
+
+### Security
+- Recovery after a crash, no permission prompts at launch, and the Screen Assistant's API keys in the Keychain.
+
+### Fixed
+- The Russian interface was checked in full (454 corrections).
+
 ## [1.0.3]
 
 ### Changed

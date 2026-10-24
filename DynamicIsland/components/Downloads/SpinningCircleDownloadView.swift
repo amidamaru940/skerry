@@ -19,6 +19,8 @@
 import SwiftUI
 
 struct SpinningCircleDownloadView: View {
+    /// A download that has stopped growing holds the spinner still.
+    var isSpinning: Bool = true
     @State private var isRotating = false
     
     var body: some View {
@@ -35,12 +37,22 @@ struct SpinningCircleDownloadView: View {
                     style: StrokeStyle(lineWidth: 3.5, lineCap: .round)
                 )
                 .rotationEffect(Angle(degrees: isRotating ? 360 : 0))
-                .onAppear {
-                    withAnimation(.linear(duration: 1).repeatForever(autoreverses: false)) {
-                        isRotating = true
-                    }
-                }
+                .onAppear { setSpinning(isSpinning) }
+                .onChange(of: isSpinning) { _, spinning in setSpinning(spinning) }
         }
         .frame(width: 16, height: 16)
+    }
+
+    private func setSpinning(_ spinning: Bool) {
+        if spinning {
+            withAnimation(.linear(duration: 1).repeatForever(autoreverses: false)) {
+                isRotating = true
+            }
+        } else {
+            // A plain assignment replaces the repeating animation: it stops.
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction) { isRotating = false }
+        }
     }
 }

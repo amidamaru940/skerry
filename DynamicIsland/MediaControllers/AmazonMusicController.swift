@@ -208,8 +208,13 @@ class FilteredNowPlayingController: ObservableObject, MediaControllerProtocol {
         let logName = controllerName
         stderrPipe.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
-            guard !data.isEmpty,
-                  let message = String(data: data, encoding: .utf8)?
+            guard !data.isEmpty else {
+                // End of file: left installed, the handler is called again at
+                // once, for ever (a core at 100% once the adapter exits).
+                handle.readabilityHandler = nil
+                return
+            }
+            guard let message = String(data: data, encoding: .utf8)?
                     .trimmingCharacters(in: .whitespacesAndNewlines),
                   !message.isEmpty
             else { return }
@@ -221,19 +226,16 @@ class FilteredNowPlayingController: ObservableObject, MediaControllerProtocol {
 
         do {
             try process.run()
+            // Only the handler and a weak self: a task that awaited a method
+            // of self kept the controller, and its perl process, for ever.
+            // Weak on the task too, or it holds self strongly for the inner capture.
             streamTask = Task { [weak self] in
-                await self?.processJSONStream()
+                await pipeHandler.readJSONLines(as: NowPlayingUpdate.self) { [weak self] update in
+                    await self?.handleAdapterUpdate(update)
+                }
             }
         } catch {
             assertionFailure("Failed to launch mediaremote-adapter.pl: \(error)")
-        }
-    }
-
-    private func processJSONStream() async {
-        guard let pipeHandler = self.pipeHandler else { return }
-
-        await pipeHandler.readJSONLines(as: NowPlayingUpdate.self) { [weak self] update in
-            await self?.handleAdapterUpdate(update)
         }
     }
 

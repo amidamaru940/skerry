@@ -75,6 +75,10 @@ class SystemOSDManager {
 
     private static func handleSystemWake() {
         suppressionState.withLock { $0.systemSleeping = false }
+        // A dark wake (lid closed, Maintenance Sleep) has nobody at the Mac:
+        // no watcher then. Unlocking re-runs the suppression, and the next
+        // volume or brightness key (`suppressNativeOSDNow`) starts it too.
+        guard ActivityGate.shared.allows(.userPresent) else { return }
         // If suppression was still active when we went to sleep, restart the watcher.
         let active = suppressionState.withLock { $0.active }
         if active {
@@ -263,6 +267,10 @@ class SystemOSDManager {
             if let pid = osduiHelperPID() {
                 suppressionState.withLock { $0.lastSuspendedPID = pid }
             }
+            // A key brings a fresh helper; watch for it for a while.
+            if isCurrentTransition(generation, active: true) {
+                startSuppressionWatcher()
+            }
         }
     }
     
@@ -379,6 +387,9 @@ class SystemOSDManager {
     /// and is restarted by handleSystemWake() when the machine wakes up again.
     /// This prevents the ~192,000 pgrep subprocess spawns that would otherwise
     /// accumulate over an 8-hour sleep and exhaust the process table / fd limits.
+    /// Checks without a new helper before the watcher stops (~30 s).
+    static let watcherQuietChecks = 40
+
     private static func startSuppressionWatcher() {
         let newTask = Task.detached(priority: .background) {
             var stableChecks = 0
@@ -404,6 +415,11 @@ class SystemOSDManager {
                 }
 
                 stableChecks += 1
+                // Quiet for about half a minute: done until the next volume or
+                // brightness key (`suppressNativeOSDNow` starts this again) or
+                // the next wake. Upstream kept listing every process once a
+                // second for as long as the app ran.
+                if stableChecks >= SystemOSDManager.watcherQuietChecks { break }
                 let intervalNs: UInt64
                 if currentPID == nil {
                     intervalNs = 1_000_000_000 // 1s — helper not running
@@ -412,7 +428,7 @@ class SystemOSDManager {
                 } else if stableChecks < 20 {
                     intervalNs = 500_000_000 // 500ms
                 } else {
-                    intervalNs = 1_000_000_000 // 1s — steady state
+                    intervalNs = 1_000_000_000 // 1s
                 }
                 try? await Task.sleep(nanoseconds: intervalNs)
             }

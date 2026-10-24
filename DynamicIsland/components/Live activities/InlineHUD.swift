@@ -116,17 +116,157 @@ struct InlineHUD: View {
     
     @State private var displayName: String = ""
 
+    /// The AirPods listening-mode HUD at its widest (the outer frame's
+    /// bound): equal wings for the longest label the HUD shows.
     static func airPodsListeningModeWidth(
         closedNotchWidth: CGFloat,
         gestureProgress: CGFloat
     ) -> CGFloat {
-        let leadingWidth: CGFloat = 44
-        let trailingWidth: CGFloat = 180
-        let centerWidth = max(closedNotchWidth - 20, 0)
-        return leadingWidth + gestureProgress / 2 + centerWidth + trailingWidth + gestureProgress / 2
+        let wing = max(44, listeningModeTextCap + 8) + gestureProgress / 2
+        return 2 * wing + closedNotchWidth
     }
-    
+
+    /// The glyph's 20 pt box and the 5 pt after it in the leading wing.
+    static let glyphAndSpacing: CGFloat = 25
+    /// The listening-mode label never takes more than this; longer labels
+    /// scale down.
+    static let listeningModeTextCap: CGFloat = 124
+    /// `.caption.weight(.medium)`, the listening-mode label.
+    static let listeningModeFont = NSFont.systemFont(
+        ofSize: NSFont.preferredFont(forTextStyle: .caption1).pointSize,
+        weight: .medium
+    )
+
+    /// The two wings a HUD with text (Caps Lock, AirPods, the mic and timer
+    /// events) asks for, before they are made equal: the leading glyph and
+    /// name, and the trailing value. A listening-mode label is measured, so
+    /// equal wings stay no wider than it needs.
+    static func textWings(
+        type: SneakContentType,
+        listeningModeLabel: String?,
+        hasBatteryLevel: Bool,
+        showsDeviceName: Bool,
+        circularBattery: Bool,
+        showsBatteryPercentage: Bool,
+        showsCapsLockLabel: Bool,
+        gestureProgress: CGFloat
+    ) -> (info: CGFloat, trailing: CGFloat) {
+        let isListeningModeEvent = type == .bluetoothAudio && listeningModeLabel != nil
+
+        let baseInfoWidth: CGFloat = {
+            if type == .bluetoothAudio {
+                if isListeningModeEvent { return 44 }
+                return showsDeviceName ? 132 : 64
+            }
+            if type == .capsLock && !showsCapsLockLabel { return 56 }
+            return 92
+        }()
+        let minimumInfo: CGFloat = {
+            if type == .bluetoothAudio {
+                if isListeningModeEvent { return 38 }
+                return showsDeviceName ? 112 : 60
+            }
+            if type == .capsLock && !showsCapsLockLabel { return 44 }
+            return 88
+        }()
+
+        let baseTrailingWidth: CGFloat = {
+            if type == .bluetoothAudio {
+                if let listeningModeLabel {
+                    let label = min(ClosedWingE.measure(listeningModeLabel, font: listeningModeFont), listeningModeTextCap)
+                    return max(64, label + 8)
+                }
+                if !hasBatteryLevel { return showsDeviceName ? 110 : 80 }
+                if circularBattery { return showsBatteryPercentage ? 112 : 76 }
+                return showsBatteryPercentage ? 128 : 100
+            }
+            if type == .capsLock { return showsCapsLockLabel ? 88 : 0 }
+            return 92
+        }()
+        let minimumTrailing: CGFloat = {
+            if type == .bluetoothAudio {
+                if isListeningModeEvent { return 64 }
+                if !hasBatteryLevel { return showsDeviceName ? 102 : 80 }
+                if circularBattery { return showsBatteryPercentage ? 102 : 64 }
+                return showsBatteryPercentage ? 112 : 82
+            }
+            if type == .capsLock { return showsCapsLockLabel ? 72 : 0 }
+            return 90
+        }()
+
+        return (
+            info: max(baseInfoWidth + gestureProgress / 2, minimumInfo),
+            trailing: max(baseTrailingWidth + gestureProgress / 2, minimumTrailing)
+        )
+    }
+
+    @Environment(\.colorSchemeContrast) private var contrast
+
+    /// Volume, brightness and the keyboard backlight are E's line of light
+    /// (docs/design/VISUAL-E.md §2.10, sheet 1.3 S11–S12).
+    static func showsLevelLine(_ type: SneakContentType) -> Bool {
+        type == .volume || type == .brightness || type == .backlight
+    }
+
+    /// The level wing inside the island's padding: W 62 from the camera.
+    static let levelWingWidth: CGFloat = 62 - cornerRadiusInsets.closed.bottom
+
     var body: some View {
+        if Self.showsLevelLine(type) {
+            levelBody
+        } else {
+            otherBody
+        }
+    }
+
+    /// The HUD glyph in the leading wing, the 48 pt level line in the trailing
+    /// one; no number, no plate. Muted: the slashed speaker in grey over the
+    /// bare track.
+    private var levelBody: some View {
+        let muted = type == .volume && value.isZero
+        let wing = max(Self.levelWingWidth + gestureProgress / 2, DSE.Size.levelClosed)
+        return HStack(spacing: 0) {
+            levelGlyph(muted: muted)
+                .frame(width: wing, height: ClosedWingE.content, alignment: .leading)
+                .offset(x: -ClosedWingE.outset)
+
+            Rectangle()
+                .fill(.black)
+                .frame(width: vm.closedNotchSize.width)
+
+            LevelLine(level: Double(value), length: DSE.Size.levelClosed, isMuted: muted)
+                .frame(width: wing, height: ClosedWingE.content, alignment: .trailing)
+                .offset(x: ClosedWingE.outset)
+        }
+        .frame(height: vm.closedNotchSize.height + (hoverAnimation ? 8 : 0), alignment: .center)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(Text(Type2Name(type)))
+    }
+
+    private func levelGlyph(muted: Bool) -> some View {
+        Group {
+            switch type {
+            case .volume:
+                if icon.isEmpty {
+                    // Headphones while Bluetooth audio is connected, otherwise the speaker.
+                    Image(systemName: bluetoothManager.isBluetoothAudioConnected ? "headphones" : SpeakerSymbol(value))
+                        .symbolVariant(value > 0 ? .none : .slash)
+                } else {
+                    Image(systemName: icon)
+                }
+            case .brightness:
+                Image(systemName: !icon.isEmpty ? icon : BrightnessSymbol(value))
+            default:
+                Image(systemName: BacklightSymbol(value))
+            }
+        }
+        .symbolVariant(.fill)
+        .contentTransition(.interpolate)
+        .font(DSE.Typeface.glyphClosed)
+        .foregroundStyle(muted ? DSE.Palette.secondary(contrast) : DSE.Palette.text)
+    }
+
+    private var otherBody: some View {
         let useCircularIndicator = useCircularBluetoothBatteryIndicator
         let listeningModeEvent = bluetoothManager.activeListeningModeEvent
         let listeningMode = listeningModeEvent?.mode ?? (type == .bluetoothAudio && value < 0 ? AirPodsListeningMode.fromHUDSymbol(icon) : nil)
@@ -136,100 +276,28 @@ struct InlineHUD: View {
 
         // Widths stay constant whether hovered or not so HUD text/icons do
         // not slide toward the notch edges when the user moves over it.
-        let baseInfoWidth: CGFloat = {
-            if type == .bluetoothAudio {
-                if isListeningModeEvent {
-                    return 44
-                }
-                if showBluetoothDeviceNameMarquee {
-                    return 132
-                }
-                return 64
-            }
+        let wings = Self.textWings(
+            type: type,
+            listeningModeLabel: listeningMode?.displayName,
+            hasBatteryLevel: hasBatteryLevel,
+            showsDeviceName: showBluetoothDeviceNameMarquee,
+            circularBattery: useCircularIndicator,
+            showsBatteryPercentage: showBluetoothBatteryPercentageText,
+            showsCapsLockLabel: showCapsLockLabel,
+            gestureProgress: gestureProgress
+        )
+        // Equal wings (E §2.1): the island is centred on the camera, so a
+        // trailing wing wider than the leading one slid the black middle off
+        // the camera and the text after it in under the camera.
+        let geometry = ClosedWingGeometry.equalWings(
+            closedNotchWidth: vm.closedNotchSize.width,
+            leading: wings.info,
+            trailing: wings.trailing
+        )
+        let infoWidth = geometry.leadingWing
+        let trailingWidth = geometry.trailingWing
 
-            if type == .capsLock && !showCapsLockLabel {
-                return 56
-            }
-
-            return 92
-        }()
-
-        let infoWidth: CGFloat = {
-            let width = baseInfoWidth + gestureProgress / 2
-            let minimum: CGFloat = {
-                if type == .bluetoothAudio {
-                    if isListeningModeEvent {
-                        return 38
-                    }
-                    if showBluetoothDeviceNameMarquee {
-                        return 112
-                    }
-                    return 60
-                }
-
-                if type == .capsLock && !showCapsLockLabel {
-                    return 44
-                }
-
-                return 88
-            }()
-            return max(width, minimum)
-        }()
-
-        let baseTrailingWidth: CGFloat = {
-            if type == .bluetoothAudio {
-                if !hasBatteryLevel {
-                    if isListeningModeEvent {
-                        return 180
-                    }
-                    return showBluetoothDeviceNameMarquee ? (110) : (80)
-                }
-
-                if useCircularIndicator {
-                    return showBluetoothBatteryPercentageText ? (112) : (76)
-                }
-
-                return showBluetoothBatteryPercentageText ? (128) : (100)
-            }
-
-            if type == .capsLock {
-                if showCapsLockLabel {
-                    return 88
-                }
-                return 0
-            }
-
-            return 92
-        }()
-
-        let trailingWidth: CGFloat = {
-            let width = baseTrailingWidth + gestureProgress / 2
-            let minimum: CGFloat = {
-                if type == .bluetoothAudio {
-                    if !hasBatteryLevel {
-                        if isListeningModeEvent {
-                            return 172
-                        }
-                        return showBluetoothDeviceNameMarquee ? (102) : (80)
-                    }
-
-                    if useCircularIndicator {
-                        return showBluetoothBatteryPercentageText ? (102) : (64)
-                    }
-
-                    return showBluetoothBatteryPercentageText ? (112) : (82)
-                }
-
-                if type == .capsLock {
-                    return showCapsLockLabel ? (72) : 0
-                }
-
-                return 90
-            }()
-            return max(width, minimum)
-        }()
-
-        return HStack {
+        return HStack(spacing: 0) {
             HStack(spacing: 5) {
                 Group {
                     switch (type) {
@@ -307,7 +375,8 @@ struct InlineHUD: View {
                             nsFont: .body,
                             textColor: .white,
                             minDuration: 0.2,
-                            frameWidth: infoWidth
+                            // The glyph and its spacing share the wing.
+                            frameWidth: max(0, infoWidth - Self.glyphAndSpacing)
                         )
                     }
                 } else if type != .capsLock {
@@ -324,7 +393,7 @@ struct InlineHUD: View {
             
             Rectangle()
                 .fill(.black)
-                .frame(width: vm.closedNotchSize.width - 20)
+                .frame(width: geometry.middle)
             
             HStack {
                 if (type == .mic) {
@@ -357,7 +426,7 @@ struct InlineHUD: View {
                     }
                 } else if (type == .bluetoothAudio) {
                     if let listeningMode {
-                        let listeningModeTextWidth: CGFloat = 124
+                        let listeningModeTextWidth = Self.listeningModeTextCap
 
                         // Render every mode label with a trailing-aligned Text.
                         // The previous MarqueeText path is `.leading`-aligned
@@ -374,7 +443,7 @@ struct InlineHUD: View {
                             .truncationMode(.tail)
                             .allowsTightening(true)
                             .frame(
-                                width: min(max(trailingWidth - 44, 64), listeningModeTextWidth),
+                                width: max(0, min(trailingWidth - 8, listeningModeTextWidth)),
                                 alignment: .trailing
                             )
                             .frame(maxWidth: .infinity, alignment: .trailing)

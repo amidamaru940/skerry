@@ -20,6 +20,7 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
+import Combine
 import Defaults
 import EventKit
 import SwiftUI
@@ -59,6 +60,7 @@ class CalendarManager: ObservableObject {
     private var lastLockScreenEventsFetchDate: Date?
     private let lockScreenRefreshInterval: TimeInterval = 15
     private var lockScreenRefreshTask: Task<Void, Never>?
+    private var lockScreenVisibilityCancellable: AnyCancellable?
 
     var hasCalendarAccess: Bool { isAuthorized(calendarAuthorizationStatus) }
     var hasReminderAccess: Bool { isAuthorized(reminderAuthorizationStatus) }
@@ -66,7 +68,19 @@ class CalendarManager: ObservableObject {
     private init() {
         currentWeekStartDate = CalendarManager.startOfDay(Date())
         setupEventStoreChangedObserver()
-        startLockScreenRefreshLoop()
+        // The lock screen's events are refreshed while it is on screen;
+        // upstream fetched them every minute from launch, all day.
+        lockScreenVisibilityCancellable = ActivityGate.shared.$state
+            .map { $0.screenInUse && !$0.unlocked }
+            .removeDuplicates()
+            .sink { [weak self] lockScreenVisible in
+                if lockScreenVisible {
+                    self?.startLockScreenRefreshLoop()
+                } else {
+                    self?.lockScreenRefreshTask?.cancel()
+                    self?.lockScreenRefreshTask = nil
+                }
+            }
         Task {
             await reloadCalendarAndReminderLists()
         }
@@ -401,6 +415,7 @@ class CalendarManager: ObservableObject {
         lockScreenRefreshTask?.cancel()
         lockScreenRefreshTask = Task { [weak self] in
             guard let self else { return }
+            if self.hasCalendarAccess { await self.updateLockScreenEvents(force: false) }
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 60 * 1_000_000_000)
                 if Task.isCancelled { break }

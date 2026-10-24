@@ -542,16 +542,8 @@ struct ColorListRow: View {
         
         if interval < 60 {
             return String(localized: "Just now")
-        } else if interval < 3600 {
-            let minutes = Int(interval / 60)
-            return String(localized: "\(minutes)m ago")
-        } else if interval < 86400 {
-            let hours = Int(interval / 3600)
-            return String(localized: "\(hours)h ago")
-        } else {
-            let days = Int(interval / 86400)
-            return String(localized: "\(days)d ago")
         }
+        return RelativeTimeText.short.localizedString(for: date, relativeTo: Date())
     }
 }
 
@@ -601,16 +593,10 @@ struct ColorDetailsView: View {
         
         if interval < 60 {
             return String(localized: "just now")
-        } else if interval < 3600 {
-            let minutes = Int(interval / 60)
-            return String(localized: "\(minutes) minute\(minutes == 1 ? "" : "s") ago")
-        } else if interval < 86400 {
-            let hours = Int(interval / 3600)
-            return String(localized: "\(hours) hour\(hours == 1 ? "" : "s") ago")
-        } else {
-            let days = Int(interval / 86400)
-            return String(localized: "\(days) day\(days == 1 ? "" : "s") ago")
         }
+        // The system's words, with the language's plurals: the hand-made
+        // "minute\(s)" read «5 минутs назад» in Russian.
+        return RelativeTimeText.full.localizedString(for: date, relativeTo: Date())
     }
 }
 
@@ -720,4 +706,20 @@ struct NativeStyleCloseButton: View {
     .onAppear {
         ColorPickerManager.shared.colorHistory = PickedColor.sampleColors
     }
+}
+
+/// "5 minutes ago" / «5 минут назад», "5 min. ago" / «5 мин назад»: the
+/// system's relative times in the app's language, with its plurals.
+enum RelativeTimeText {
+    static let full: RelativeDateTimeFormatter = {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .full
+        return formatter
+    }()
+
+    static let short: RelativeDateTimeFormatter = {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .abbreviated
+        return formatter
+    }()
 }

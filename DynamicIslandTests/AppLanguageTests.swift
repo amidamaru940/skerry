@@ -55,9 +55,9 @@ final class AppLanguageTests: XCTestCase {
         let en = try XCTUnwrap(Bundle(path: enPath))
         let samples = [
             "Open only by click": "Открывать только по клику",
-            "Hide the island in full-screen apps": "Скрывать «островок» в полноэкранных приложениях",
+            "Hide the island in full-screen apps": "Скрывать островок в полноэкранных приложениях",
             "Pinned": "Закреплённые",
-            "No screenshots yet": "Скриншотов пока нет",
+            "No screenshots yet": "Снимков пока нет",
             "Turn on lyrics?": "Включить тексты песен?",
             "As in System": "Как в системе",
         ]

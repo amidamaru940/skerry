@@ -81,13 +81,8 @@ struct CustomIdleAnimation: Codable, Hashable, Equatable, Defaults.Serializable,
     
     /// Get the effective transform config (override or default)
     func getTransformConfig() -> AnimationTransformConfig {
-        let override = Defaults[.animationTransformOverrides][id.uuidString]
-        if let override = override {
-            print("📋 [CustomIdleAnimation] Found override for '\(name)': \(override)")
-        } else {
-            print("📋 [CustomIdleAnimation] No override for '\(name)', using default")
-        }
-        return override ?? .default
+        // Read on every evaluation of the idle view: no logging here.
+        Defaults[.animationTransformOverrides][id.uuidString] ?? .default
     }
 }
 
@@ -1001,9 +996,13 @@ extension Defaults.Keys {
     
         // MARK: Behavior
     /// Hover delay before the island opens (Skerry: 150 ms; upstream 0.3 s).
+    /// Back from 0.5 s (owner, 22.10.2026: no extra delay): the open island
+    /// no longer covers the menus beside the camera (`OpenIslandNeck`).
     static let minimumHoverDuration = Key<TimeInterval>("minimumHoverDuration", default: 0.15)
     static let enableHaptics = Key<Bool>("enableHaptics", default: true)
     /// Off = "Open only by click": nothing opens the island on hover, the timer included.
+    /// On by default again (owner, 22.10.2026): the open island now hangs below
+    /// the menu bar (`OpenIslandNeck`), so hovering no longer hides the menus.
     static let openNotchOnHover = Key<Bool>("openNotchOnHover", default: true)
 	static let extendHoverArea = Key<Bool>("extendHoverArea", default: false)
     static let externalDisplayStyle = Key<ExternalDisplayStyle>(
@@ -1155,7 +1154,8 @@ extension Defaults.Keys {
     )
     static let lockScreenPanelUsesBlur = Key<Bool>("lockScreenPanelUsesBlur", default: true)
     static let lockScreenMusicMergedAirPlayOutput = Key<Bool>("lockScreenMusicMergedAirPlayOutput", default: true)
-    static let lockScreenMusicFullscreenArtworkEnabled = Key<Bool>("lockScreenMusicFullscreenArtworkEnabled", default: true)
+    // Off by default: it rewrites the system wallpaper store and freezes its renderers.
+    static let lockScreenMusicFullscreenArtworkEnabled = Key<Bool>("lockScreenMusicFullscreenArtworkEnabled", default: false)
     static let lockScreenKeepAlbumArtVisibleDuringFullscreenArtwork = Key<Bool>("lockScreenKeepAlbumArtVisibleDuringFullscreenArtwork", default: false)
     /// Apple Music animated artwork: MusicKit authorization prompt plus
     /// api.music.apple.com requests per track. Off in Skerry.
@@ -1304,7 +1304,10 @@ extension Defaults.Keys {
     static let showBluetoothDeviceNameMarquee = Key<Bool>("showBluetoothDeviceNameMarquee", default: false)
     static let useBluetoothHUD3DIcon = Key<Bool>("useBluetoothHUD3DIcon", default: true)
     static let showAirPodsListeningModeChanges = Key<Bool>("showAirPodsListeningModeChanges", default: true)
-    
+    /// «Показывать заряд наушников?» was shown; it is asked once per install
+    /// (§5.8). See `BluetoothAudioManager.isBatteryQuestionDue`.
+    static let bluetoothQuestionShown = Key<Bool>("bluetoothQuestionShown", default: false)
+
     // MARK: Stats Feature
     static let enableStatsFeature = Key<Bool>("enableStatsFeature", default: false)
     static let enableLLMUsageFeature = Key<Bool>("enableLLMUsageFeature", default: false)
@@ -1431,8 +1434,12 @@ extension Defaults.Keys {
     static let screenshotBatchGapMinutes = Key<Int>("screenshotBatchGapMinutes", default: 15)
     /// Removing a screenshot from a batch also moves the file to the Trash.
     static let screenshotMoveOriginalsToTrash = Key<Bool>("screenshotMoveOriginalsToTrash", default: false)
-    /// Saves screenshots taken to the clipboard as PNG in ~/Screenshots/Clipboard and adds them.
-    static let collectClipboardScreenshots = Key<Bool>("collectClipboardScreenshots", default: false)
+    /// Screenshots taken to the clipboard (⌃⇧⌘3/4) join the batches too, as
+    /// temporary PNG files (`TemporaryClipboardShots`). On by default: to the
+    /// owner they are the screenshots that matter most (22.10), and the
+    /// onboarding's and Settings' «Скриншоты» switch turns both parts on and
+    /// off together (`ScreenshotFeature`).
+    static let collectClipboardScreenshots = Key<Bool>("collectClipboardScreenshots", default: true)
     /// Width of a thumbnail in the Screenshots tab, in points.
     static let screenshotThumbnailSize = Key<Double>("screenshotThumbnailSize", default: 110)
     /// Take screenshots out of their batch after they were dragged somewhere.
@@ -1443,13 +1450,32 @@ extension Defaults.Keys {
     /// ("unset" when it had no value), so the change can be undone.
     static let screenshotThumbnailPreviousValue = Key<String?>("screenshotThumbnailPreviousValue", default: nil)
 
+    // MARK: Protected folders (Skerry)
+    // The first look at the Desktop, Documents or Downloads brings up a macOS
+    // prompt. A folder is first looked at only after the person asked for
+    // something that needs it, and each flag records that this happened:
+    // launch and the permission rows look at a folder only with its flag set
+    // (docs/design/REDESIGN-SPEC.md §5.8). See `migrateFolderFirstTouch` for
+    // installs that ran an earlier build.
+    /// The screenshot folder was looked at after «Continue» on onboarding
+    /// step 2 with Screenshots on, the first open of the Screenshots segment,
+    /// or collecting turned on in Settings → Screenshots.
+    static let screenshotFolderTouched = Key<Bool>("screenshotFolderTouched", default: false)
+    /// The folder macOS last answered for after that, which launch looks at
+    /// again; `FolderFirstTouch.anyScreenshotFolder` on an earlier install.
+    static let screenshotFolderTouchedPath = Key<String?>("screenshotFolderTouchedPath", default: nil)
+    /// ~/Downloads was opened after the download listener was turned on, or
+    /// after «Request Folder Access» in Shelf settings.
+    static let downloadsFolderTouched = Key<Bool>("downloadsFolderTouched", default: false)
+    /// ~/Documents was read after «Request Folder Access» in Shelf settings.
+    static let documentsFolderTouched = Key<Bool>("documentsFolderTouched", default: false)
+    static let didMigrateFolderFirstTouch = Key<Bool>("didMigrateFolderFirstTouch", default: false)
+
     // MARK: Screen Assistant Feature
     static let enableScreenAssistant = Key<Bool>("enableScreenAssistant", default: false)
     static let screenAssistantDisplayMode = Key<ScreenAssistantDisplayMode>("screenAssistantDisplayMode", default: .panel)
-    static let geminiApiKey = Key<String>("geminiApiKey", default: "")
-    static let openaiApiKey = Key<String>("openaiApiKey", default: "")
-    static let claudeApiKey = Key<String>("claudeApiKey", default: "")
-    static let groqApiKey = Key<String>("groqApiKey", default: "")
+    // The API keys live in the Keychain (ScreenAssistantKeys); the plain
+    // copies upstream kept here are moved by ScreenAssistantKeyMigration.
     static let selectedAIProvider = Key<AIModelProvider>("selectedAIProvider", default: .gemini)
     static let selectedAIModel = Key<AIModel?>("selectedAIModel", default: nil)
     static let enableThinkingMode = Key<Bool>("enableThinkingMode", default: false)
@@ -1687,6 +1713,44 @@ extension Defaults.Keys {
         if Defaults[.timerDisplayMode] == .popover {
             Defaults[.timerDisplayMode] = .tab
         }
+    }
+
+    /// Builds before this one looked at the screenshot folder at every
+    /// launch, whatever the screenshot switches said, opened ~/Downloads at
+    /// launch while the download listener was on, and read Documents and
+    /// Downloads whenever Shelf settings opened. On a Mac that ran one,
+    /// macOS has already answered for those folders, so the install gets
+    /// every first-touch flag and goes on exactly as before: the screenshot
+    /// manager starts at launch (collecting, clipboard screenshots and the
+    /// batches as they were), the listener starts at launch while its
+    /// switch is on, and Shelf settings read the folders. Not only installs
+    /// that used screenshots: a flag that stayed unset would make such an
+    /// install wait for a click it never needed before. Only a fresh install
+    /// waits for the person (§5.8). Runs once, before launch looks at any
+    /// folder; a later launch of a fresh install keeps its flags unset.
+    ///
+    /// The traces are read from the app's own stored preferences, not the
+    /// merged view, which also holds every registered default
+    /// (`FolderFirstTouch.launchedBefore(storedIn:)`).
+    ///
+    /// The screenshot flag is given for any folder
+    /// (`FolderFirstTouch.anyScreenshotFolder`): those builds followed the
+    /// folder wherever it went, at launch too. A fresh install's flag holds
+    /// only for the folder macOS answered for; when the folder moved while
+    /// Skerry was not running, launch leaves it alone and the next use of
+    /// screenshots looks at it.
+    static func migrateFolderFirstTouch() {
+        guard Defaults[.didMigrateFolderFirstTouch] == false else { return }
+        let launchedBefore = FolderFirstTouch.launchedBefore(
+            hasScreenshotBatches: FileManager.default.fileExists(atPath: ScreenshotShelfManager.batchesFile.path)
+        )
+        if launchedBefore {
+            Defaults[.screenshotFolderTouched] = true
+            Defaults[.screenshotFolderTouchedPath] = FolderFirstTouch.anyScreenshotFolder
+            Defaults[.downloadsFolderTouched] = true
+            Defaults[.documentsFolderTouched] = true
+        }
+        Defaults[.didMigrateFolderFirstTouch] = true
     }
 
     /// The minimalistic mode hid the tabs and every way back to the

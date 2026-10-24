@@ -19,7 +19,6 @@ https://api.groq.com/openai/v1/chat/completions | Screen Assistant: Groq | enabl
 https://api.anthropic.com/v1/messages | Screen Assistant: Anthropic | enableScreenAssistant = true + Claude API key
 http://localhost:11434 | Screen Assistant: local Ollama endpoint (default value of localModelEndpoint; loopback) | enableScreenAssistant = true + local provider selected
 https://api.anthropic.com/api/oauth/usage | LLM usage monitor: Claude quota | enableLLMUsageFeature = true
-https://platform.claude.com/v1/oauth/token | LLM usage monitor: Claude OAuth token refresh | enableLLMUsageFeature = true
 https://chatgpt.com/backend-api/wham/usage | LLM usage monitor: Codex quota | enableLLMUsageFeature = true
 https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage | LLM usage monitor: Cursor quota | enableLLMUsageFeature = true
 https://cursor.com/api/usage-summary | LLM usage monitor: Cursor usage summary | enableLLMUsageFeature = true

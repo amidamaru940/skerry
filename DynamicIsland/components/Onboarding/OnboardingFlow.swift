@@ -59,6 +59,14 @@ enum OnboardingFlow {
         !completed && (firstLaunch || savedStep != nil)
     }
 
+    /// «Continue» on step two with Screenshots on is the person asking for
+    /// screenshots: their folder is looked at then, and macOS may ask for
+    /// it, not at launch (docs/design/REDESIGN-SPEC.md §5.8). Back and Skip
+    /// do not count.
+    static func startsScreenshots(leaving step: Step, for target: Step, screenshotsOn: Bool) -> Bool {
+        screenshotsOn && step == .features && target == step.next
+    }
+
     /// The things step two offers. Nothing that talks to the network is in
     /// the list.
     struct Feature: Identifiable, Equatable {
@@ -77,7 +85,7 @@ enum OnboardingFlow {
                 detail: "Everything you copy, to paste again later.",
                 permission: "No permission needed.", key: .enableClipboardManager),
         Feature(id: "screenshots", symbol: "camera.viewfinder", title: "Screenshots",
-                detail: "New screenshots gather in batches, ready to paste into a chat.",
+                detail: "New screenshots, saved or taken to the clipboard, gather in batches, ready to paste into a chat.",
                 permission: "macOS may ask for the folder they are saved in.", key: .enableScreenshotShelf),
         Feature(id: "music", symbol: "music.note", title: "Music",
                 detail: "What is playing, with play, pause and skip.",
@@ -89,6 +97,17 @@ enum OnboardingFlow {
                 detail: "A terminal that drops down from the notch.",
                 permission: "No permission needed.", key: .enableTerminalFeature),
     ]
+
+    /// A switch on step two. Screenshots are one feature: their switch also
+    /// collects the ones taken to the clipboard (⌃⇧⌘4), which were left out
+    /// on a fresh install (owner, 22.10).
+    static func setFeature(_ feature: Feature, on: Bool) {
+        if feature.key.name == Defaults.Keys.enableScreenshotShelf.name {
+            ScreenshotFeature.setEnabled(on)
+        } else {
+            Defaults[feature.key] = on
+        }
+    }
 
     /// Settings the old profiles applied whatever was picked; kept, without
     /// the profiles.
@@ -257,6 +276,9 @@ struct OnboardingFlowView: View {
     // MARK: Moving
 
     private func go(to target: OnboardingFlow.Step) {
+        if OnboardingFlow.startsScreenshots(leaving: step, for: target, screenshotsOn: Defaults[.enableScreenshotShelf]) {
+            ScreenshotShelfManager.shared.startOnFirstUse()
+        }
         withAnimation(DS.spring) { step = target }
         Defaults[.onboardingStep] = target.rawValue
     }
@@ -312,7 +334,7 @@ private struct FeatureToggleRow: View {
             Toggle("", isOn: $isOn)
                 .labelsHidden()
                 .toggleStyle(.switch)
-                .onChange(of: isOn) { _, value in Defaults[feature.key] = value }
+                .onChange(of: isOn) { _, value in OnboardingFlow.setFeature(feature, on: value) }
         }
     }
 }

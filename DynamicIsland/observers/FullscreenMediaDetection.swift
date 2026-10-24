@@ -21,58 +21,103 @@
  */
 
 import ApplicationServices
+import Combine
 import Defaults
 import MacroVisionKit
 import SwiftUI
 
+/// Decides, per screen, whether the closed island hides because an app is
+/// full screen there. It recomputes only on events: a Space change, an app
+/// activation, a screen change, a new music source, a new hide option.
+@MainActor
 class FullscreenMediaDetector: ObservableObject {
-    static let shared = FullscreenMediaDetector()
-    private let detector: MacroVisionKit
-    @ObservedObject private var musicManager = MusicManager.shared
-    @MainActor @Published private(set) var fullscreenStatus: [String: Bool] = [:]
-    private var notificationTask: Task<Void, Never>?
+    /// An app whose window fills a screen. `isNativeFullscreen` asks
+    /// Accessibility, so it is called only when the hide option needs it.
+    struct FullscreenApp {
+        let bundleIdentifier: String?
+        let screenName: String
+        let isNativeFullscreen: () -> Bool
+    }
 
-    private init() {
-        self.detector = MacroVisionKit.shared
-        detector.configuration.includeSystemApps = true
-        setupNotificationObservers()
+    /// What the hide is computed from and what recomputes it. `live` is the
+    /// app; tests pass their own, without MacroVisionKit, Accessibility or
+    /// the owner's settings.
+    struct Inputs {
+        var fullscreenApps: () -> [FullscreenApp]
+        var screenNames: () -> [String]
+        var isEnabled: () -> Bool
+        var hideOption: () -> HideNotchOption
+        /// The hide option or the detection switch changed.
+        var hideOptionChanges: AnyPublisher<Void, Never>
+        /// The bundle identifier of the app the music comes from.
+        var musicSource: AnyPublisher<String?, Never>
+        /// Where Space changes and app activations are posted.
+        var workspaceCenter: NotificationCenter
+        /// Where screen parameter changes are posted.
+        var appCenter: NotificationCenter
+    }
+
+    /// Chrome's Now Playing session flips between Chrome and nothing while a
+    /// film plays. A new source counts at once; «nothing» only once it has
+    /// lasted this long, so a gap never brings the island back over the film.
+    static let musicSourceRelease: DispatchQueue.SchedulerTimeType.Stride = .seconds(3)
+    /// A Space change arrives while the window still animates into place.
+    static let systemChangeSettle: DispatchQueue.SchedulerTimeType.Stride = .milliseconds(500)
+
+    static let shared = FullscreenMediaDetector(inputs: .live)
+
+    @Published private(set) var fullscreenStatus: [String: Bool] = [:]
+    private let inputs: Inputs
+    private let musicSourceRelease: DispatchQueue.SchedulerTimeType.Stride
+    private var musicSourceBundleID: String?
+    private var cancellables = Set<AnyCancellable>()
+
+    init(inputs: Inputs, musicSourceRelease: DispatchQueue.SchedulerTimeType.Stride = musicSourceRelease) {
+        self.inputs = inputs
+        self.musicSourceRelease = musicSourceRelease
+        setupObservers()
         updateFullScreenStatus()
     }
 
-    private func setupNotificationObservers() {
-        notificationTask = Task { @Sendable [weak self] in
-            await withTaskGroup(of: Void.self) { group in
-                group.addTask {
-                    let activeSpaceNotifications = NSWorkspace.shared.notificationCenter.notifications(
-                        named: NSWorkspace.activeSpaceDidChangeNotification
-                    )
-                    
-                    for await _ in activeSpaceNotifications {
-                        await self?.handleChange()
-                    }
-                }
-                
-                group.addTask {
-                    let screenParameterNotifications = NSWorkspace.shared.notificationCenter.notifications(
-                        named:  NSApplication.didChangeScreenParametersNotification
-                    )
-                    
-                    for await _ in screenParameterNotifications {
-                        await  self?.handleChange()
-                    }
-                }
-            }
-        }
-    }
+    private func setupObservers() {
+        let workspace = inputs.workspaceCenter
+        Publishers.Merge3(
+            workspace.publisher(for: NSWorkspace.activeSpaceDidChangeNotification),
+            workspace.publisher(for: NSWorkspace.didActivateApplicationNotification),
+            // Posted on the app's own center, never on NSWorkspace's.
+            inputs.appCenter.publisher(for: NSApplication.didChangeScreenParametersNotification)
+        )
+        .debounce(for: Self.systemChangeSettle, scheduler: DispatchQueue.main)
+        .sink { [weak self] _ in self?.updateFullScreenStatus() }
+        .store(in: &cancellables)
 
-    private func handleChange() async {
-        try? await Task.sleep(for: .milliseconds(500))
-        self.updateFullScreenStatus()
+        // A source applies at once; «nothing» waits out the release, and a
+        // source arriving in the meantime cancels it (switchToLatest).
+        let release = musicSourceRelease
+        inputs.musicSource
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .map { source -> AnyPublisher<String?, Never> in
+                guard source == nil else { return Just(source).eraseToAnyPublisher() }
+                return Just(nil).delay(for: release, scheduler: DispatchQueue.main).eraseToAnyPublisher()
+            }
+            .switchToLatest()
+            .removeDuplicates()
+            .sink { [weak self] source in
+                self?.musicSourceBundleID = source
+                self?.updateFullScreenStatus()
+            }
+            .store(in: &cancellables)
+
+        inputs.hideOptionChanges
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] in self?.updateFullScreenStatus() }
+            .store(in: &cancellables)
     }
 
     private func updateFullScreenStatus() {
-        guard Defaults[.enableFullscreenMediaDetection] else {
-            let reset = Dictionary(uniqueKeysWithValues: NSScreen.screens.map { ($0.localizedName, false) })
+        guard inputs.isEnabled() else {
+            let reset = Dictionary(uniqueKeysWithValues: inputs.screenNames().map { ($0, false) })
             if reset != fullscreenStatus {
                 fullscreenStatus = reset
             }
@@ -80,14 +125,14 @@ class FullscreenMediaDetector: ObservableObject {
         }
         
 
-        let apps = detector.detectFullscreenApps(debug: false)
-        let names = NSScreen.screens.map { $0.localizedName }
-        let hideOption = Defaults[.hideNotchOption]
+        let apps = inputs.fullscreenApps()
+        let names = inputs.screenNames()
+        let hideOption = inputs.hideOption()
 
         var newStatus: [String: Bool] = [:]
         for name in names {
             newStatus[name] = apps.contains { app in
-                guard app.screen.localizedName == name,
+                guard app.screenName == name,
                       app.bundleIdentifier != "com.apple.finder" else { return false }
 
                 // The notch stays on display by default (the window's collectionBehavior
@@ -96,11 +141,11 @@ class FullscreenMediaDetector: ObservableObject {
                 switch hideOption {
                 case .always:
                     // Hide for any app in genuine native fullscreen on this screen.
-                    return isInNativeFullscreen(app)
+                    return app.isNativeFullscreen()
                 case .nowPlayingOnly:
                     // Hide only when the currently playing media app is in fullscreen.
-                    return app.bundleIdentifier == musicManager.bundleIdentifier
-                        && isInNativeFullscreen(app)
+                    return app.bundleIdentifier == musicSourceBundleID
+                        && app.isNativeFullscreen()
                 case .never:
                     // Always on display; never hide.
                     return false
@@ -119,10 +164,13 @@ class FullscreenMediaDetector: ObservableObject {
     /// fullscreen window report nearly identical frames, so frame size alone can't tell them
     /// apart — the Accessibility `AXFullScreen` attribute can. Falls back to the detector's
     /// frame-based result when Accessibility isn't trusted (so behavior doesn't silently break).
-    private func isInNativeFullscreen(_ app: MacroVisionKit.FullscreenWindowInfo) -> Bool {
+    nonisolated static func isInNativeFullscreen(processId: pid_t) -> Bool {
         guard AXIsProcessTrusted() else { return true }
 
-        let appElement = AXUIElementCreateApplication(app.processId)
+        let appElement = AXUIElementCreateApplication(processId)
+        // This runs on the main actor: a busy app must not stall the island
+        // for the default six seconds.
+        AXUIElementSetMessagingTimeout(appElement, 0.25)
 
         // Prefer the focused window, then fall back to scanning all windows.
         if let focused: AXUIElement = copyAttribute(kAXFocusedWindowAttribute as CFString, from: appElement),
@@ -137,25 +185,49 @@ class FullscreenMediaDetector: ObservableObject {
         return false
     }
 
-    private func isWindowFullscreen(_ window: AXUIElement) -> Bool {
+    private nonisolated static func isWindowFullscreen(_ window: AXUIElement) -> Bool {
         // "AXFullScreen" is the (undocumented but stable) attribute set true only in native
         // fullscreen; maximized/zoomed windows report false or omit it.
         let value: Bool? = copyAttribute("AXFullScreen" as CFString, from: window)
         return value ?? false
     }
 
-    private func copyAttribute<T>(_ attribute: CFString, from element: AXUIElement) -> T? {
+    private nonisolated static func copyAttribute<T>(_ attribute: CFString, from element: AXUIElement) -> T? {
         var value: CFTypeRef?
         guard AXUIElementCopyAttributeValue(element, attribute, &value) == .success,
               let typed = value as? T else { return nil }
         return typed
     }
+}
 
-    private func cleanupNotificationObservers() {
-        NSWorkspace.shared.notificationCenter.removeObserver(self)
-    }
-
-    deinit {
-        NSWorkspace.shared.notificationCenter.removeObserver(self)
+extension FullscreenMediaDetector.Inputs {
+    /// The app: MacroVisionKit and Accessibility for the windows, Defaults
+    /// for the settings, MusicManager for the music source.
+    static var live: Self {
+        let detector = MacroVisionKit.shared
+        detector.configuration.includeSystemApps = true
+        return Self(
+            fullscreenApps: {
+                detector.detectFullscreenApps(debug: false).map { app in
+                    let processId = app.processId
+                    return FullscreenMediaDetector.FullscreenApp(
+                        bundleIdentifier: app.bundleIdentifier,
+                        screenName: app.screen.localizedName,
+                        isNativeFullscreen: { FullscreenMediaDetector.isInNativeFullscreen(processId: processId) }
+                    )
+                }
+            },
+            screenNames: { NSScreen.screens.map { $0.localizedName } },
+            isEnabled: { Defaults[.enableFullscreenMediaDetection] },
+            hideOption: { Defaults[.hideNotchOption] },
+            hideOptionChanges: Publishers.Merge(
+                Defaults.publisher(.hideNotchOption, options: []).map { _ in () },
+                Defaults.publisher(.enableFullscreenMediaDetection, options: []).map { _ in () }
+            )
+            .eraseToAnyPublisher(),
+            musicSource: MusicManager.shared.$bundleIdentifier.eraseToAnyPublisher(),
+            workspaceCenter: NSWorkspace.shared.notificationCenter,
+            appCenter: NotificationCenter.default
+        )
     }
 }

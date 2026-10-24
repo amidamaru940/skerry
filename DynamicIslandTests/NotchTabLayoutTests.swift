@@ -81,7 +81,7 @@ final class NotchTabLayoutTests: XCTestCase {
     @MainActor
     func testGridTabsAreTallerAndTheTabCountUsesTheLayout() {
         XCTAssertEqual(tabOpenHeight(for: .screenshots), 320)
-        XCTAssertEqual(tabOpenHeight(for: .clipboard), 320, "full height until its content is measured")
+        XCTAssertEqual(tabOpenHeight(for: .clipboard), BufferFit.maximum, "full height until its content is measured")
         XCTAssertNil(tabOpenHeight(for: .home))
         XCTAssertEqual(enabledStandardTabCount(), NotchTabLayout.visibleTabs.count)
     }
@@ -183,5 +183,27 @@ final class NotchTabLayoutPersistenceTests: XCTestCase {
         try Data([2]).write(to: second)
         manager.didCapture(second, at: Date())
         XCTAssertEqual(DynamicIslandViewCoordinator.shared.currentView, .home)
+    }
+    /// Buffer v3: a new screenshot opens «Буфер» on «Все» (its film and
+    /// key), unless «Снимки» already shows it.
+    func testANewScreenshotPutsTheOtherFiltersOnAll() throws {
+        Defaults[.enableScreenshotShelf] = true
+        Defaults[.notchHiddenTabs] = []
+        Defaults[.openScreenshotsOnNewScreenshot] = true
+        let buffer = BufferTabState.shared
+        let savedSegment = buffer.segment
+        defer { buffer.segment = savedSegment }
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("amg-capture-filter-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let manager = ScreenshotShelfManager(store: ScreenshotBatchStore(fileURL: nil, batchGap: { 900 }))
+
+        for (index, (before, after)) in [(BufferSegment.text, BufferSegment.all), (.files, .all), (.screenshots, .screenshots)].enumerated() {
+            buffer.segment = before
+            let shot = folder.appendingPathComponent("shot-\(index).png")
+            try Data([UInt8(index + 1)]).write(to: shot)
+            manager.didCapture(shot, at: Date())
+            XCTAssertEqual(buffer.segment, after, "\(before)")
+        }
     }
 }

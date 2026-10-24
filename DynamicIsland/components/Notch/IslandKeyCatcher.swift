@@ -26,17 +26,25 @@ import SwiftUI
 /// opened by hovering is not the key window.
 struct IslandKeyCatcher: NSViewRepresentable {
     let onKey: (NSEvent) -> Bool
+    /// ⌘-keys that also work while a text field in the same window has the
+    /// keyboard: «Буфер»'s search field and its ⌘1…⌘9.
+    var onKeyWhileTyping: ((NSEvent) -> Bool)? = nil
 
     func makeNSView(context: Context) -> KeyCatcherView {
         let view = KeyCatcherView()
         view.onKey = onKey
+        view.onKeyWhileTyping = onKeyWhileTyping
         return view
     }
 
-    func updateNSView(_ view: KeyCatcherView, context: Context) { view.onKey = onKey }
+    func updateNSView(_ view: KeyCatcherView, context: Context) {
+        view.onKey = onKey
+        view.onKeyWhileTyping = onKeyWhileTyping
+    }
 
     final class KeyCatcherView: NSView {
         var onKey: ((NSEvent) -> Bool)?
+        var onKeyWhileTyping: ((NSEvent) -> Bool)?
 
         override var acceptsFirstResponder: Bool { true }
 
@@ -51,8 +59,10 @@ struct IslandKeyCatcher: NSViewRepresentable {
         }
 
         override func performKeyEquivalent(with event: NSEvent) -> Bool {
-            guard window?.firstResponder === self, onKey?(event) == true else { return super.performKeyEquivalent(with: event) }
-            return true
+            if window?.firstResponder === self, onKey?(event) == true { return true }
+            // A field editor has the keyboard: only the keys asked for here.
+            if let onKeyWhileTyping, window?.firstResponder is NSText, onKeyWhileTyping(event) { return true }
+            return super.performKeyEquivalent(with: event)
         }
 
         override func viewDidMoveToWindow() {

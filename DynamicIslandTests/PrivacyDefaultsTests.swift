@@ -172,7 +172,7 @@ final class ClipboardPrivacyTests: XCTestCase {
         XCTAssertTrue(root.path.hasSuffix("/Library/Application Support/\(Bundle.main.bundleIdentifier!)"))
         XCTAssertTrue(ClipboardManager.defaultDataDirectory.path.hasPrefix(root.path))
         for folder in [CustomAppIcon.iconDirectory, NoteItem.noteImageDataDirectory,
-                       ScreenAssistantManager.audioDataDirectory, ScreenAssistantManager.screenshotDataDirectory] {
+                       ScreenAssistantManager.screenshotDataDirectory] {
             XCTAssertTrue(folder.path.hasPrefix(root.path), folder.path)
             XCTAssertFalse(folder.path.contains("/Documents/"), folder.path)
         }
@@ -345,5 +345,30 @@ final class NetworkDefaultsTests: XCTestCase {
         LLMUsageManager.shared.refreshAll(force: true)
 
         XCTAssertFalse(LLMUsageManager.shared.isRefreshing)
+    }
+}
+
+// MARK: - System safety
+
+/// Skerry freezes system processes and rewrites the wallpaper for some features;
+/// a crash must not leave them that way.
+final class SystemSafetyTests: XCTestCase {
+    func testFullScreenLockScreenArtworkIsOffByDefault() {
+        XCTAssertFalse(Defaults.Keys.lockScreenMusicFullscreenArtworkEnabled.defaultValue)
+    }
+
+    func testProcessSignalsFindsAProcessByName() {
+        let pids = ProcessSignals.pids(named: [ProcessInfo.processInfo.processName])
+        XCTAssertTrue(pids.contains(getpid()))
+    }
+
+    func testContinuingAProcessThatDoesNotExistSignalsNothing() {
+        XCTAssertEqual(ProcessSignals.continueProcesses(named: ["SkerryNoSuchProcess"]), 0)
+    }
+
+    func testWallpaperBackupSurvivesARestart() {
+        let backup = FullScreenArtworkWindowManager.backupFolder.standardizedFileURL.path
+        XCTAssertTrue(backup.hasPrefix(AppDataDirectory.root.standardizedFileURL.path))
+        XCTAssertFalse(backup.hasPrefix(FileManager.default.temporaryDirectory.standardizedFileURL.path))
     }
 }

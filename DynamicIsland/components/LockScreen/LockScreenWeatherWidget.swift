@@ -113,11 +113,20 @@ struct LockScreenWeatherWidget: View {
 			updateMinuteAlignedTimer()
 		}
 
+		/// Only while locked: the widget is on the lock screen. A tolerance
+		/// lets macOS fold the wakeups in with others (upstream: none, and
+		/// running unlocked too).
 		private func startGeneralRefresh() {
+			guard isLocked else {
+				refreshTimer?.invalidate()
+				refreshTimer = nil
+				return
+			}
+			guard refreshTimer == nil else { return }
 			refreshTimer = Timer.scheduledTimer(withTimeInterval: 15.0, repeats: true) { [weak self] _ in
 				self?.fireNow()
 			}
-			refreshTimer?.tolerance = 0
+			refreshTimer?.tolerance = 3
 			if let refreshTimer {
 				RunLoop.main.add(refreshTimer, forMode: .common)
 			}
@@ -140,6 +149,7 @@ struct LockScreenWeatherWidget: View {
 				guard let self else { return }
 				self.isLocked = true
 				self.fireNow()
+				self.startGeneralRefresh()
 				self.updateMinuteAlignedTimer()
 			}
 
@@ -151,6 +161,7 @@ struct LockScreenWeatherWidget: View {
 				guard let self else { return }
 				self.isLocked = false
 				self.fireNow()
+				self.startGeneralRefresh()
 				self.updateMinuteAlignedTimer()
 			}
 		}
@@ -188,12 +199,12 @@ struct LockScreenWeatherWidget: View {
 				self.minuteTimer = Timer.scheduledTimer(withTimeInterval: 60.0, repeats: true) { [weak self] _ in
 					self?.fireNow()
 				}
-				self.minuteTimer?.tolerance = 0
+				self.minuteTimer?.tolerance = 1
 				if let minuteTimer {
 					RunLoop.main.add(minuteTimer, forMode: .common)
 				}
 			}
-			minuteTimer?.tolerance = 0
+			minuteTimer?.tolerance = 1
 			if let minuteTimer {
 				RunLoop.main.add(minuteTimer, forMode: .common)
 			}

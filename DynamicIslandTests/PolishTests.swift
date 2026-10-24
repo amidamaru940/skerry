@@ -154,6 +154,14 @@ final class PolishTests: XCTestCase {
                       "the system's temporary folder, not ~/Screenshots")
     }
 
+    func testATemporaryScreenshotIsKnownByItsPathAlone() {
+        let folder = URL(fileURLWithPath: "/private/var/folders/xy/T/Skerry clipboard screenshots", isDirectory: true)
+        XCTAssertTrue(TemporaryClipboardShots.holds(path: folder.path + "/Clipboard Screenshot 1.png", in: folder))
+        XCTAssertFalse(TemporaryClipboardShots.holds(path: "/Users/someone/Desktop/Screenshot 1.png", in: folder))
+        XCTAssertFalse(TemporaryClipboardShots.holds(path: folder.path + " 2/a.png", in: folder), "a neighbour folder")
+        XCTAssertFalse(TemporaryClipboardShots.holds(path: folder.path, in: folder), "the folder itself")
+    }
+
     func testRemovingATemporaryScreenshotDeletesItWithoutTheTrashQuestion() throws {
         let saved = Defaults[.screenshotMoveOriginalsToTrash]
         defer { Defaults[.screenshotMoveOriginalsToTrash] = saved }

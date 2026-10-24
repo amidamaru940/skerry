@@ -168,4 +168,30 @@ enum PlayerControlsLayout {
             trailing: Array(extras.dropFirst(leadingCount))
         )
     }
+
+    /// The hover slots after the transport, and what the «…» menu lists
+    /// instead of the row.
+    struct Row: Equatable {
+        var buttons: [MusicControlButton]
+        var showsVolume: Bool
+        var overflow: [MusicControlButton]
+    }
+
+    /// The extras «…» has a row for.
+    static let menuControls: Set<MusicControlButton> = [.repeatMode, .lyrics, .likeTrack]
+
+    /// Beside «Далее» the text column is 178 wide: ⏮ ⏯ ⏭ and two slots,
+    /// ⤮ then «Звук» (VISUAL-E §2.5). «Звук» is the first output picker, or
+    /// the volume button when there is none. Repeat, lyrics and favourite
+    /// move to «…»; a second output picker and the volume button beside an
+    /// output picker (its popover has the volume) are dropped.
+    static func besideNext(_ extras: [MusicControlButton], volume: Bool) -> Row {
+        let shuffle = extras.first { $0 == .shuffle }
+        let output = extras.first { $0 == .mediaOutput || $0 == .airPlay }
+        return Row(
+            buttons: [shuffle, output].compactMap { $0 },
+            showsVolume: volume && output == nil,
+            overflow: extras.filter { menuControls.contains($0) }
+        )
+    }
 }

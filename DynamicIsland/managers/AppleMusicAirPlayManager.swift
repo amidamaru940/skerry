@@ -67,10 +67,19 @@ final class AppleMusicAirPlayManager: ObservableObject {
 
     // MARK: - Device management
 
-    func refreshDevices() async {
+    /// - Parameter afterClick: the person opened the AirPlay list, which is
+    ///   when macOS may ask about Music (§5.8). Opening the island or a change
+    ///   of player reads the list only once Music is allowed.
+    func refreshDevices(afterClick: Bool = false) async {
         guard !isBusy else { return }
         isBusy = true
         defer { isBusy = false }
+
+        let consent = AutomationConsent.music
+        let allowed = afterClick
+            ? await consent.allowsClickedEvent()
+            : await consent.allowsUnclickedEvent()
+        guard allowed else { return }
 
         isLoading = true
         defer { isLoading = false }
@@ -97,8 +106,22 @@ final class AppleMusicAirPlayManager: ObservableObject {
 
         guard let result = try? await AppleScriptHelper.execute(script) else { return }
 
+        let fetched = Self.devices(from: result)
+        devices = fetched
+        for device in fetched {
+            lastCommittedVolume[device.id] = device.volume
+        }
+    }
+
+    /// The devices in the script's answer, one {name, kind, selected, address,
+    /// volume} list each. An error in the script answers {}, which the range
+    /// 1...0 trapped on.
+    nonisolated static func devices(from result: NSAppleEventDescriptor) -> [AirPlayDevice] {
+        let count = result.numberOfItems
+        guard count > 0 else { return [] }
+
         var fetched: [AirPlayDevice] = []
-        for i in 1...result.numberOfItems {
+        for i in 1...count {
             guard let item = result.atIndex(i) else { continue }
             let name = item.atIndex(1)?.stringValue ?? "Unknown"
             let kind = item.atIndex(2)?.stringValue ?? "AirPlay device"
@@ -108,16 +131,14 @@ final class AppleMusicAirPlayManager: ObservableObject {
             let id = addr.isEmpty ? name : addr
             fetched.append(AirPlayDevice(id: id, name: name, kind: kind, isSelected: selected, volume: volume))
         }
-        devices = fetched
-        for device in fetched {
-            lastCommittedVolume[device.id] = device.volume
-        }
+        return fetched
     }
 
     func toggleDevice(_ device: AirPlayDevice) async {
         guard !isBusy else { return }
         isBusy = true
         defer { isBusy = false }
+        guard await AutomationConsent.music.allowsClickedEvent() else { return }
 
         let newState = !device.isSelected
         let escapedName = device.name.replacingOccurrences(of: "\"", with: "\\\"")
@@ -232,6 +253,8 @@ final class AppleMusicAirPlayManager: ObservableObject {
     }
 
     private func sendVolumeAppleScript(escapedName: String, volume: Int) async {
+        // A drag of the slider.
+        guard await AutomationConsent.music.allowsClickedEvent() else { return }
         let script = """
         tell application "Music"
             try

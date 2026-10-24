@@ -17,6 +17,7 @@
  */
 
 import AppKit
+import Combine
 import Foundation
 import Darwin
 
@@ -29,31 +30,41 @@ final class MemoryUsageMonitor {
 #else
     private let thresholdBytes: UInt64 = 1_024 * 1_024 * 1_024
 #endif
-    private let pollInterval: TimeInterval = 8 // Clamp within 5-10 seconds to limit battery impact
     private let restartCooldown: TimeInterval = 300
     private let logSampleInterval: TimeInterval = 300
-    private var monitorTask: Task<Void, Never>?
+    private var pressureSource: DispatchSourceMemoryPressure?
+    private var gateCancellable: AnyCancellable?
     private var lastRestartAttempt: Date = .distantPast
     private var lastLogSample: Date = .distantPast
 
+    /// Looks at the footprint when something happens instead of every 8 s:
+    /// macOS reports memory pressure, the person comes back to the Mac, the
+    /// island opens (`checkNow`). A leak large enough to matter is caught at
+    /// the next of these.
     func startMonitoring() {
-        guard monitorTask == nil else { return }
-        monitorTask = Task { [weak self] in
-            guard let self else { return }
-            while !Task.isCancelled {
-                await self.evaluateMemoryFootprint()
-                do {
-                    try await Task.sleep(for: .seconds(self.pollInterval))
-                } catch {
-                    break
-                }
-            }
+        guard pressureSource == nil else { return }
+        let source = DispatchSource.makeMemoryPressureSource(eventMask: [.warning, .critical], queue: .main)
+        source.setEventHandler { [weak self] in
+            MainActor.assumeIsolated { self?.checkNow() }
         }
+        source.resume()
+        pressureSource = source
+        gateCancellable = ActivityGate.shared.publisher(for: .userPresent)
+            .filter { $0 }
+            .sink { [weak self] _ in
+                self?.checkNow()
+            }
     }
 
     func stopMonitoring() {
-        monitorTask?.cancel()
-        monitorTask = nil
+        pressureSource?.cancel()
+        pressureSource = nil
+        gateCancellable = nil
+    }
+
+    func checkNow() {
+        guard pressureSource != nil else { return }
+        Task { await evaluateMemoryFootprint() }
     }
 
     private func evaluateMemoryFootprint() async {

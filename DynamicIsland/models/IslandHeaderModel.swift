@@ -86,12 +86,17 @@ enum IslandStatus {
 /// lives in its tab only since step D5.)
 enum IslandMoreMenu {
     enum Entry: Equatable {
+        /// «Очистить историю» on «Буфер», with «Отменить» instead of a
+        /// question (Buffer v3, Q26); the count of recent entries beside it.
+        case clearClipboardHistory(count: Int)
         case keepAwake
         case colorPicker
         case clipboard
         case clipboardPause(paused: Bool)
         case appVolume
         case mirror
+        /// A player button the row beside «Далее» has no room for.
+        case player(MusicControlButton)
         case settings
     }
 
@@ -109,10 +114,18 @@ enum IslandMoreMenu {
         var clipboardPaused = false
         var appVolume = false
         var mirror = false
+        /// From `PlayerOverflow`: the «Сейчас» section on top.
+        var player: [MusicControlButton] = []
+        /// On «Буфер» with its history: the recent entries a clear removes.
+        var clipboardHistoryCount: Int? = nil
     }
 
     static func entries(for features: Features) -> [Entry] {
         var entries: [Entry] = []
+        if features.clipboard, let count = features.clipboardHistoryCount {
+            entries.append(.clearClipboardHistory(count: count))
+        }
+        entries += features.player.map { .player($0) }
         if features.keepAwake { entries.append(.keepAwake) }
         if features.colorPicker { entries.append(.colorPicker) }
         if features.clipboard && features.clipboardOutsideTabs { entries.append(.clipboard) }
@@ -131,7 +144,46 @@ enum IslandMoreMenu {
         case .colorPicker: return .colorPicker
         case .clipboard: return .clipboard
         case .appVolume: return .appVolume
-        case .clipboardPause, .mirror, .settings: return nil
+        case .clearClipboardHistory, .clipboardPause, .mirror, .player, .settings: return nil
         }
+    }
+
+    /// A hairline goes above Settings, under the «Сейчас» section and under
+    /// «Очистить историю».
+    static func startsSection(_ entries: [Entry], at index: Int) -> Bool {
+        guard entries.indices.contains(index), index > 0 else { return false }
+        if entries[index] == .settings { return true }
+        if case .clearClipboardHistory = entries[index - 1] { return true }
+        return entries[index - 1].isPlayer && !entries[index].isPlayer
+    }
+}
+
+extension IslandMoreMenu.Entry {
+    var isPlayer: Bool {
+        if case .player = self { return true }
+        return false
+    }
+}
+
+/// The player buttons the open row leaves out (beside «Далее»), for «…».
+/// The open player sets it on appear and on change; only the open «…»
+/// menu watches it, so nothing re-renders while the menu is closed.
+@MainActor
+final class PlayerOverflow: ObservableObject {
+    static let shared = PlayerOverflow()
+
+    @Published private(set) var buttons: [MusicControlButton] = []
+    /// The player that set it: a player going away clears only its own.
+    private var owner: UUID?
+
+    func set(_ buttons: [MusicControlButton], owner token: UUID) {
+        owner = token
+        if self.buttons != buttons { self.buttons = buttons }
+    }
+
+    func clear(owner token: UUID) {
+        guard owner == token else { return }
+        owner = nil
+        if !buttons.isEmpty { buttons = [] }
     }
 }

@@ -222,10 +222,12 @@ class ClipboardManager: ObservableObject {
     /// True while a clipboard item is being dragged out; keeps the notch open
     /// (see `shouldPreventAutoClose`). SwiftUI `.onDrag` has no drag-end callback,
     /// so a bounded timeout releases it in case a drop is never observed.
-    @Published var isDraggingItem: Bool = false
-    private var dragResetWork: DispatchWorkItem?
+    /// A card is being dragged out of the Clipboard tab. Set and cleared by
+    /// the card's AppKit dragging source, which reports the real end.
+    @Published private(set) var isDraggingItem: Bool = false
 
-    private var timer: Timer?
+    /// Our place in the shared `changeCount` look while monitoring.
+    private var watcherToken: UUID?
     private var lastChangeCount: Int = 0
     private var persistenceCancellable: AnyCancellable?
     private var pinnedPersistenceCancellable: AnyCancellable?
@@ -269,16 +271,42 @@ class ClipboardManager: ObservableObject {
         scheduleAutoClear()
     }
 
-    /// Runs the age-based cleanup once a minute and whenever its setting
-    /// changes, independent of whether the pasteboard is being watched.
+    /// Runs the age-based cleanup when the next item is due and whenever its
+    /// setting changes, independent of whether the pasteboard is being
+    /// watched. One timer for the earliest expiry, not a minute tick: nothing
+    /// wakes the app while nothing is due. A timer due during sleep fires on
+    /// wake.
     private func scheduleAutoClear() {
-        expiryTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
-            self?.purgeExpiredItems()
-        }
-        autoClearCancellable = Defaults.publisher(.clipboardAutoClearHours, options: [])
-            .sink { [weak self] _ in
+        autoClearCancellable = Defaults.publisher(keys: .clipboardAutoClearHours, .clipboardOneTimeCodeExpiry, options: [])
+            .sink { [weak self] in
                 DispatchQueue.main.async { self?.purgeExpiredItems() }
             }
+    }
+
+    /// When the next unpinned item expires under the current settings, or nil
+    /// when none ever will.
+    static func nextExpiry(of items: [ClipboardItem], autoClearHours: Int, removeCodes: Bool) -> Date? {
+        items.compactMap { item -> Date? in
+            var due: [Date] = []
+            if autoClearHours > 0 { due.append(item.timestamp.addingTimeInterval(Double(autoClearHours) * 3600)) }
+            if removeCodes && item.isOneTimeCode { due.append(item.timestamp.addingTimeInterval(oneTimeCodeLifetime)) }
+            return due.min()
+        }.min()
+    }
+
+    private func rescheduleExpiry(now: Date = Date()) {
+        expiryTimer?.invalidate()
+        expiryTimer = nil
+        guard let due = Self.nextExpiry(of: clipboardHistory,
+                                        autoClearHours: Defaults[.clipboardAutoClearHours],
+                                        removeCodes: Defaults[.clipboardOneTimeCodeExpiry]) else { return }
+        // A second late is fine; the tolerance lets macOS fold the wakeup in.
+        let timer = Timer(fire: max(due, now).addingTimeInterval(0.5), interval: 0, repeats: false) { [weak self] _ in
+            self?.purgeExpiredItems()
+        }
+        timer.tolerance = 5
+        RunLoop.main.add(timer, forMode: .common)
+        expiryTimer = timer
     }
 
     /// Removes history items older than `clipboardAutoClearHours` (0 keeps
@@ -292,6 +320,7 @@ class ClipboardManager: ObservableObject {
         let expired = clipboardHistory.filter {
             $0.timestamp < cutoff || (removeCodes && $0.isOneTimeCode && $0.timestamp <= codeCutoff)
         }
+        defer { rescheduleExpiry(now: now) }
         guard !expired.isEmpty else { return }
 
         for item in expired {
@@ -453,40 +482,34 @@ class ClipboardManager: ObservableObject {
         guard !isMonitoring else { return }
         
         isMonitoring = true
-        timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+        // Once a second, only while someone is at the Mac
+        // (`ClipboardChangeWatcher`); upstream looked twice a second for ever.
+        lastChangeCount = NSPasteboard.general.changeCount
+        watcherToken = ClipboardChangeWatcher.shared.add { [weak self] _ in
             self?.checkClipboard()
         }
     }
     
     func stopMonitoring() {
         isMonitoring = false
-        timer?.invalidate()
-        timer = nil
+        ClipboardChangeWatcher.shared.remove(watcherToken)
+        watcherToken = nil
     }
     
-    /// Mark a drag-out as in progress and arm a bounded safety reset. SwiftUI `.onDrag`
-    /// exposes no drag-end callback, so the notch is held open until this timeout fires;
-    /// a true completion callback would require an AppKit `NSDraggingSource` (intentionally
-    /// avoided here — see `ClipboardDragging.swift`).
-    ///
-    /// The window is a trade-off: too short and the notch closes mid-drag on a slow drag;
-    /// too long and it stays pinned open (a leak) if the drop never completes. 8s comfortably
-    /// covers a realistic drag-and-drop while keeping the worst-case leak short.
-    static let dragSafetyResetTimeout: TimeInterval = 8.0
-
-    func markDragStart() {
-        isDraggingItem = true
-        dragResetWork?.cancel()
-        let work = DispatchWorkItem { [weak self] in self?.isDraggingItem = false }
-        dragResetWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + Self.dragSafetyResetTimeout, execute: work)
-    }
+    /// A card drag began or ended. Upstream had no end callback (SwiftUI
+    /// `.onDrag`) and cleared the flag after 8 s, which let the island close
+    /// under a slower drag; the cards' AppKit source reports the real end.
+    func dragBegan() { isDraggingItem = true }
+    func dragEnded() { isDraggingItem = false }
 
     /// Puts an entry back on the clipboard. The write is marked as the app's
     /// own (the history does not record it again) and the same entry moves to
     /// the top of the history instead of a duplicate appearing.
     /// `plainText` drops formatting, links and pictures: only text goes.
+    /// A screenshot paste or copy under way stops first, so it does not
+    /// overwrite this copy a moment later.
     func copyToClipboard(_ item: ClipboardItem, plainText: Bool = false, to pasteboard: NSPasteboard = .general) {
+        ClipboardPaster.yieldClipboardFromAnyThread()
         ClipboardOwnWrites.write(to: pasteboard) { pasteboard in
             if plainText {
                 if let text = item.stringData ?? item.fileURLs?.compactMap({ URL(string: $0)?.path }).joined(separator: "\n") {
@@ -561,6 +584,108 @@ class ClipboardManager: ObservableObject {
         saveHistoryToDefaults()
     }
     
+    // MARK: Removing with «Отменить»
+
+    /// Entries taken out of the lists for a few seconds of «Отменить»: their
+    /// image files stay on disk (and in-memory pictures are held here) until
+    /// `finishRemoval` or a restore. A file left behind by a quit in between
+    /// is an unreferenced one, which the next launch deletes.
+    struct Removal {
+        struct Entry {
+            let index: Int
+            let item: ClipboardItem
+        }
+
+        fileprivate(set) var history: [Entry] = []
+        fileprivate(set) var pinned: [Entry] = []
+        fileprivate var pictures: [UUID: Data] = [:]
+
+        var count: Int { history.count + pinned.count }
+        var isEmpty: Bool { count == 0 }
+        var items: [ClipboardItem] { (pinned + history).map(\.item) }
+    }
+
+    /// Takes one entry out of the history or the pinned items (a pinned one
+    /// goes whole, as `delete` did: unpinned, then deleted), keeping what
+    /// `restore` needs to put it back where it was.
+    func remove(_ item: ClipboardItem) -> Removal {
+        var removal = Removal()
+        if let index = pinnedItems.firstIndex(where: { $0.id == item.id }) {
+            removal.pinned.append(.init(index: index, item: pinnedItems.remove(at: index)))
+        }
+        if let index = clipboardHistory.firstIndex(where: { $0.id == item.id }) {
+            removal.history.append(.init(index: index, item: clipboardHistory.remove(at: index)))
+        }
+        holdPictures(of: &removal)
+        saveHistoryToDefaults()
+        if !removal.pinned.isEmpty { savePinnedItemsToDefaults() }
+        rescheduleExpiry()
+        return removal
+    }
+
+    /// Takes the recent entries `filter` shows out (pinned ones stay), for
+    /// «Отменить».
+    func removeHistory(matching filter: ClipboardFilter = .all) -> Removal {
+        var removal = Removal()
+        removal.history = clipboardHistory.enumerated()
+            .filter { filter.matches($0.element.type) }
+            .map { .init(index: $0.offset, item: $0.element) }
+        guard !removal.history.isEmpty else { return removal }
+        let ids = Set(removal.history.map(\.item.id))
+        clipboardHistory.removeAll { ids.contains($0.id) }
+        holdPictures(of: &removal)
+        saveHistoryToDefaults()
+        rescheduleExpiry()
+        return removal
+    }
+
+    /// Puts removed entries back at their places. An entry whose content was
+    /// copied again in the meantime is not doubled: its leftovers go.
+    func restore(_ removal: Removal) {
+        var dropped: [ClipboardItem] = []
+        for (id, data) in removal.pictures { ClipboardItem.storeInMemoryImage(data, for: id) }
+        for entry in removal.pinned.sorted(by: { $0.index < $1.index }) {
+            guard !pinnedItems.contains(where: { $0.id == entry.item.id }) else { continue }
+            pinnedItems.insert(entry.item, at: min(entry.index, pinnedItems.count))
+        }
+        for entry in removal.history.sorted(by: { $0.index < $1.index }) {
+            if clipboardHistory.contains(where: { $0.id == entry.item.id || $0.isSameContent(as: entry.item) }) {
+                dropped.append(entry.item)
+                continue
+            }
+            clipboardHistory.insert(entry.item, at: min(entry.index, clipboardHistory.count))
+        }
+        if clipboardHistory.count > maxHistoryItems {
+            dropped += clipboardHistory.dropFirst(maxHistoryItems)
+            clipboardHistory = Array(clipboardHistory.prefix(maxHistoryItems))
+        }
+        deleteUnreferencedFiles(of: dropped)
+        saveHistoryToDefaults()
+        if !removal.pinned.isEmpty { savePinnedItemsToDefaults() }
+        rescheduleExpiry()
+    }
+
+    /// «Отменить» is over: the removed entries' picture files go.
+    func finishRemoval(_ removal: Removal) {
+        deleteUnreferencedFiles(of: removal.items)
+    }
+
+    /// Pictures that live only in memory are pruned as soon as their entry
+    /// leaves the lists; the removal holds them until it is undone or over.
+    private func holdPictures(of removal: inout Removal) {
+        for item in removal.items where item.type == .image && item.imageFileName == nil {
+            if let data = ClipboardItem.inMemoryImage(for: item.id) { removal.pictures[item.id] = data }
+        }
+    }
+
+    private func deleteUnreferencedFiles(of items: [ClipboardItem]) {
+        let referenced = Set(clipboardHistory.compactMap(\.imageFileName)).union(pinnedItems.compactMap(\.imageFileName))
+        for item in items {
+            guard let fileName = item.imageFileName, !referenced.contains(fileName) else { continue }
+            try? FileManager.default.removeItem(at: ClipboardManager.clipboardDataDirectory.appendingPathComponent(fileName))
+        }
+    }
+
     /// Clears favorites, deleting the image files behind them.
     ///
     /// Callers used to empty `pinnedItems` and save directly, which left the
@@ -664,7 +789,7 @@ class ClipboardManager: ObservableObject {
         guard currentChangeCount != lastChangeCount else { return }
         lastChangeCount = currentChangeCount
 
-        // Polled every half second, so the frontmost app is the one the copy
+        // Looked at once a second, so the frontmost app is the one the copy
         // was made in.
         captureChange(
             from: .general,
@@ -699,6 +824,11 @@ class ClipboardManager: ObservableObject {
         // (Skipping the copy left it where it was and orphaned the picture
         // file the new entry had already written.)
         addToHistory(clipboardItem)
+        // A picture may be the first of a run of screenshots: look fast for
+        // a few seconds so the next ones are not replaced unseen.
+        if clipboardItem.type == .image, pasteboard === NSPasteboard.general {
+            ClipboardChangeWatcher.shared.burst()
+        }
         return decision
     }
     
@@ -827,11 +957,9 @@ class ClipboardManager: ObservableObject {
             // Add to beginning of array
             self.clipboardHistory.insert(item, at: 0)
             self.lastCopiedItemDate = item.timestamp
-            if item.isOneTimeCode, Defaults[.clipboardOneTimeCodeExpiry] {
-                DispatchQueue.main.asyncAfter(deadline: .now() + Self.oneTimeCodeLifetime) { [weak self] in
-                    self?.purgeExpiredItems()
-                }
-            }
+            // A code goes after two minutes; the first entry of an empty
+            // history also starts the age-based clock.
+            self.rescheduleExpiry()
             
             // Keep only the most recent items and clean up old files
             let itemsToDelete = Array(self.clipboardHistory.dropFirst(self.maxHistoryItems))

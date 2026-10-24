@@ -10,6 +10,7 @@
 
 import AppKit
 import Combine
+import os
 import XCTest
 @testable import Atoll
 
@@ -410,5 +411,226 @@ final class AppleMusicControllerTests: XCTestCase {
         XCTAssertEqual(states.last?.artwork, newArtwork)
 
         withExtendedLifetime(cancellable) {}
+    }
+}
+
+/// §5.8: Music and Spotify are scripted only once macOS allows it, and only a
+/// click may ask.
+final class AutomationConsentTests: XCTestCase {
+    /// Whether each look-up asked the person, in order.
+    private final class Lookups: @unchecked Sendable {
+        private let calls = OSAllocatedUnfairLock(initialState: [Bool]())
+        func record(_ askingUser: Bool) { calls.withLock { $0.append(askingUser) } }
+        var askingUser: [Bool] { calls.withLock { $0 } }
+    }
+
+    /// macOS's answers, one per look-up; the last one stays.
+    private final class Answers: @unchecked Sendable {
+        private let queue: OSAllocatedUnfairLock<[OSStatus]>
+        init(_ answers: [OSStatus]) { queue = OSAllocatedUnfairLock(initialState: answers) }
+        func next() -> OSStatus { queue.withLock { $0.count > 1 ? $0.removeFirst() : $0[0] } }
+    }
+
+    // noErr, errAEEventWouldRequireUserConsent, errAEEventNotPermitted, procNotFound
+    private let allowed: OSStatus = 0
+    private let notAsked: OSStatus = -1744
+    private let refused: OSStatus = -1743
+    private let notRunning: OSStatus = -600
+
+    private func consent(answering result: OSStatus, lookups: Lookups) -> AutomationConsent {
+        consent(answering: [result], lookups: lookups)
+    }
+
+    private func consent(answering results: [OSStatus], lookups: Lookups) -> AutomationConsent {
+        let answers = Answers(results)
+        return AutomationConsent(bundleIdentifier: "com.apple.Music", observesApps: false) { _, askingUser in
+            lookups.record(askingUser)
+            return answers.next()
+        }
+    }
+
+    func testMacOSAnswersMapToStatuses() {
+        XCTAssertEqual(AutomationConsent.Status(allowed), .allowed)
+        XCTAssertEqual(AutomationConsent.Status(notAsked), .notAsked)
+        XCTAssertEqual(AutomationConsent.Status(refused), .refused)
+        XCTAssertEqual(AutomationConsent.Status(notRunning), .notRunning)
+        XCTAssertEqual(AutomationConsent.Status(-50), .unknown)
+    }
+
+    func testOnlyAYesLetsAnUnclickedEventGo() {
+        XCTAssertTrue(AutomationConsent.allowsUnclickedEvent(.allowed))
+        for status in [.notAsked, .refused, .notRunning, .unknown] as [AutomationConsent.Status] {
+            XCTAssertFalse(AutomationConsent.allowsUnclickedEvent(status), "\(status)")
+        }
+    }
+
+    func testAClickAsksOnlyWhileMacOSHasNoAnswer() {
+        XCTAssertEqual(AutomationConsent.stepForClick(.allowed), .send)
+        XCTAssertEqual(AutomationConsent.stepForClick(.notRunning), .send)
+        XCTAssertEqual(AutomationConsent.stepForClick(.notAsked), .ask)
+        XCTAssertEqual(AutomationConsent.stepForClick(.unknown), .ask)
+        XCTAssertEqual(AutomationConsent.stepForClick(.refused), .skip)
+    }
+
+    func testAfterAskingOnlyANoHoldsTheEventBack() {
+        XCTAssertTrue(AutomationConsent.sendsAfterAsking(.allowed))
+        XCTAssertTrue(AutomationConsent.sendsAfterAsking(.notAsked))
+        XCTAssertTrue(AutomationConsent.sendsAfterAsking(.notRunning))
+        XCTAssertFalse(AutomationConsent.sendsAfterAsking(.refused))
+    }
+
+    func testAClosedAppKeepsTheKnownAnswer() {
+        XCTAssertEqual(AutomationConsent.merged(.refused, with: .notRunning), .refused)
+        XCTAssertEqual(AutomationConsent.merged(.allowed, with: .notRunning), .allowed)
+        XCTAssertEqual(AutomationConsent.merged(.notAsked, with: .notRunning), .notAsked)
+        XCTAssertEqual(AutomationConsent.merged(.unknown, with: .notRunning), .notRunning)
+        XCTAssertEqual(AutomationConsent.merged(.allowed, with: .refused), .refused)
+        XCTAssertEqual(AutomationConsent.merged(.refused, with: .allowed), .allowed)
+    }
+
+    /// A Mac that already allowed Skerry is scripted as before. A click
+    /// reuses the yes without another round trip to macOS.
+    func testAClickReusesAYes() async {
+        let lookups = Lookups()
+        let consent = consent(answering: allowed, lookups: lookups)
+
+        let unclicked = await consent.allowsUnclickedEvent()
+        let clicked = await consent.allowsClickedEvent()
+
+        XCTAssertTrue(unclicked && clicked)
+        XCTAssertEqual(lookups.askingUser, [false])
+        XCTAssertEqual(consent.status, .allowed)
+    }
+
+    /// `tccutil reset` while Skerry runs sends no notification: an event
+    /// nobody clicked for still looks the answer up, even after a yes, so the
+    /// next one does not ask.
+    func testAResetIsSeenBeforeTheNextUnclickedEvent() async {
+        let lookups = Lookups()
+        let consent = consent(answering: [allowed, notAsked], lookups: lookups)
+
+        let before = await consent.allowsUnclickedEvent()
+        let after = await consent.allowsUnclickedEvent()
+
+        XCTAssertTrue(before)
+        XCTAssertFalse(after)
+        XCTAssertEqual(lookups.askingUser, [false, false])
+        XCTAssertEqual(consent.status, .notAsked)
+    }
+
+    /// A no, then Music quits: the kept answer stays no, but a click goes by
+    /// what macOS says now, so the event goes out and launches Music, as it
+    /// did before this check (a yes given in System Settings since then works).
+    func testAClickOnAClosedAppSendsWhateverWasSaidBefore() async {
+        let lookups = Lookups()
+        let consent = consent(answering: [refused, notRunning], lookups: lookups)
+
+        let refusedFirst = await consent.refresh()
+        let forClick = await consent.lookUpForClick()
+
+        XCTAssertEqual(refusedFirst, .refused)
+        XCTAssertEqual(forClick, .notRunning)
+        XCTAssertEqual(AutomationConsent.stepForClick(forClick), .send)
+        XCTAssertEqual(consent.status, .refused)
+        let unclicked = await consent.allowsUnclickedEvent()
+        XCTAssertFalse(unclicked)
+    }
+
+    /// A fresh install: nothing goes out on its own, and macOS (never the
+    /// person) is asked again before every try, so a yes given later counts.
+    func testWithoutAnAnswerNothingIsSentAndNobodyIsAsked() async {
+        let lookups = Lookups()
+        let consent = consent(answering: notAsked, lookups: lookups)
+
+        let first = await consent.allowsUnclickedEvent()
+        let second = await consent.allowsUnclickedEvent()
+
+        XCTAssertFalse(first || second)
+        XCTAssertEqual(lookups.askingUser, [false, false])
+        XCTAssertEqual(consent.status, .notAsked)
+    }
+
+    /// To macOS the test host is an app of its own: even a click must not ask.
+    func testAClickInTheTestHostNeverAsks() async {
+        let lookups = Lookups()
+        let consent = consent(answering: notAsked, lookups: lookups)
+
+        let sent = await consent.allowsClickedEvent()
+
+        XCTAssertFalse(sent)
+        XCTAssertEqual(lookups.askingUser, [false])
+    }
+
+    // MARK: Auto
+
+    private func playerToAskAbout(
+        _ choice: AutoSourceChoice,
+        systemApp: String? = nil,
+        hasSystem: Bool = true,
+        order: [AutoMediaSource] = AutoMediaSource.defaultOrder,
+        ignored: Set<String> = [],
+        running: Set<AutoMediaSource> = []
+    ) -> AutoMediaSource? {
+        AutoMediaController.playerToAskAbout(
+            choice: choice,
+            systemApp: systemApp,
+            hasSystem: hasSystem,
+            order: order,
+            ignored: ignored,
+            isRunning: { running.contains($0) }
+        )
+    }
+
+    /// §5.8: in Auto a click on a control shown through the system Now
+    /// Playing is about the app macOS reports, when that is Spotify or Music.
+    func testAnAutoClickIsAboutTheAppMacOSReports() {
+        XCTAssertEqual(playerToAskAbout(.system, systemApp: AutoMediaSource.spotifyBundleID), .spotify)
+        XCTAssertEqual(playerToAskAbout(.system, systemApp: AutoMediaSource.appleMusicBundleID), .appleMusic)
+        XCTAssertNil(playerToAskAbout(.system, systemApp: "com.apple.Safari"))
+        XCTAssertNil(playerToAskAbout(.system, systemApp: nil))
+        // A dedicated player is shown only once its app is allowed.
+        XCTAssertNil(playerToAskAbout(.dedicated(.spotify)))
+        XCTAssertNil(playerToAskAbout(.dedicated(.otherApps)))
+        // With the system Now Playing, "nothing playing" is about nobody.
+        XCTAssertNil(playerToAskAbout(.none, running: [.spotify, .appleMusic]))
+    }
+
+    /// Without the system Now Playing (MediaChecker) Auto shows nothing until
+    /// Spotify or Music may be read, so a click is about the first of them,
+    /// in the user's order, that runs and is not ignored.
+    func testWithoutTheSystemNowPlayingAClickIsAboutARunningPlayer() {
+        XCTAssertEqual(playerToAskAbout(.none, hasSystem: false, running: [.appleMusic]), .appleMusic)
+        XCTAssertEqual(playerToAskAbout(.none, hasSystem: false, running: [.spotify, .appleMusic]), .spotify)
+        XCTAssertEqual(
+            playerToAskAbout(.none, hasSystem: false, order: [.otherApps, .appleMusic, .spotify], running: [.spotify, .appleMusic]),
+            .appleMusic
+        )
+        XCTAssertEqual(
+            playerToAskAbout(.none, hasSystem: false, ignored: [AutoMediaSource.spotifyBundleID], running: [.spotify, .appleMusic]),
+            .appleMusic
+        )
+        XCTAssertNil(playerToAskAbout(.none, hasSystem: false, running: []))
+    }
+
+    /// The read after a click publishes what the player reports, through the
+    /// same path as every other read.
+    func testTheReadAfterAClickShowsTheTrack() async throws {
+        try XCTSkipIf(AutomationConsent.music.status == .allowed, "this host may already script Music")
+        let info = AppleMusicPlaybackInfo(isPlaying: true, title: "Asked", artist: "Artist", album: "Album",
+                                          currentTime: 0, duration: 60, isShuffled: false, repeatMode: .off,
+                                          artwork: Data("art".utf8))
+        let reads = OSAllocatedUnfairLock(initialState: 0)
+        let controller = AppleMusicController(startsObservers: false, playbackInfoProvider: {
+            reads.withLock { $0 += 1 }
+            return info
+        })
+        let shown = expectation(description: "track shown")
+        let cancellable = controller.playbackStatePublisher.sink { if $0.title == "Asked" { shown.fulfill() } }
+
+        await controller.refreshAfterClick(launched: true)
+
+        await fulfillment(of: [shown], timeout: 2)
+        XCTAssertEqual(reads.withLock { $0 }, 1)
+        cancellable.cancel()
     }
 }

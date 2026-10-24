@@ -18,7 +18,6 @@
 
 import AppKit
 import SwiftUI
-import AVFoundation
 import Defaults
 import Foundation
 
@@ -45,7 +44,6 @@ struct ScreenAssistantFile: Identifiable, Codable {
     let type: FileType
     let timestamp: Date
     let fileURL: String? // For local files
-    let audioFileName: String? // For audio recordings
     
     enum FileType: String, CaseIterable, Codable {
         case document = "document"
@@ -79,7 +77,6 @@ struct ScreenAssistantFile: Identifiable, Codable {
         // Defensive initialization with nil coalescing
         self.name = fileURL.lastPathComponent.isEmpty ? "Unknown File" : fileURL.lastPathComponent
         self.fileURL = fileURL.absoluteString
-        self.audioFileName = nil
         self.timestamp = Date()
         
         // Safe file extension extraction
@@ -99,46 +96,43 @@ struct ScreenAssistantFile: Identifiable, Codable {
         
         print("✅ ScreenAssistantFile: Created file entry - name: \(self.name), type: \(self.type), url: \(self.fileURL ?? "nil")")
     }
-    
-    init(audioFileName: String, name: String) {
-        self.name = name
-        self.type = .audio
-        self.fileURL = nil
-        self.audioFileName = audioFileName
-        self.timestamp = Date()
-    }
 }
 
 class ScreenAssistantManager: NSObject, ObservableObject {
     static let shared = ScreenAssistantManager()
     
     @Published var attachedFiles: [ScreenAssistantFile] = []
-    @Published var isRecording: Bool = false
-    @Published var recordingDuration: TimeInterval = 0
     @Published var chatMessages: [ChatMessage] = []
     @Published var isLoading: Bool = false
     
-    private var audioRecorder: AVAudioRecorder?
-    private var recordingTimer: Timer?
     private var activeRequest: URLSessionTask?
     
     // Panel management
     private var chatMessagesPanel: ChatMessagesPanel?
     private var chatInputPanel: ChatInputPanel?
     
-    // Directory for storing audio recordings
-    static let audioDataDirectory: URL = AppDataDirectory.folder("ScreenAssistantAudio")
-    
     // Directory for storing screenshots
     static let screenshotDataDirectory: URL = AppDataDirectory.folder("ScreenAssistantScreenshots")
+    
+    /// Where voice questions kept their recordings. Voice questions are gone
+    /// and nothing in the interface reaches this folder any more, so it goes.
+    /// Not `AppDataDirectory.folder`: that would create it again.
+    static let legacyAudioDirectory: URL = AppDataDirectory.root.appendingPathComponent("ScreenAssistantAudio", isDirectory: true)
     
     private override init() {
         super.init()
         loadFilesFromDefaults()
+        Self.removeLegacyAudioDirectory()
+    }
+    
+    /// Off the main thread; a folder that is already gone is no error.
+    private static func removeLegacyAudioDirectory() {
+        DispatchQueue.global(qos: .utility).async {
+            try? FileManager.default.removeItem(at: legacyAudioDirectory)
+        }
     }
     
     deinit {
-        stopRecording()
         closePanels()
     }
     
@@ -239,87 +233,13 @@ class ScreenAssistantManager: NSObject, ObservableObject {
     
     func removeFile(_ file: ScreenAssistantFile) {
         attachedFiles.removeAll { $0.id == file.id }
-        
-        // Clean up audio file if it exists
-        if let audioFileName = file.audioFileName {
-            let audioURL = ScreenAssistantManager.audioDataDirectory.appendingPathComponent(audioFileName)
-            try? FileManager.default.removeItem(at: audioURL)
-        }
-        
         saveFilesToDefaults()
     }
     
     func clearAllFiles() {
-        // Clean up all audio files
-        for file in attachedFiles {
-            if let audioFileName = file.audioFileName {
-                let audioURL = ScreenAssistantManager.audioDataDirectory.appendingPathComponent(audioFileName)
-                try? FileManager.default.removeItem(at: audioURL)
-            }
-        }
-        
         attachedFiles.removeAll()
         saveFilesToDefaults()
-    }
-    
-    // MARK: - Audio Recording
-    
-    func toggleRecording() {
-        if isRecording {
-            stopRecording()
-        } else {
-            startRecording()
-        }
-    }
-    
-    private func startRecording() {
-        guard !isRecording else { return }
-        
-        let fileName = "recording_\(Date().timeIntervalSince1970).m4a"
-        let audioURL = ScreenAssistantManager.audioDataDirectory.appendingPathComponent(fileName)
-        
-        let settings: [String: Any] = [
-            AVFormatIDKey: Int(kAudioFormatMPEG4AAC),
-            AVSampleRateKey: 44100,
-            AVNumberOfChannelsKey: 2,
-            AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue
-        ]
-        
-        do {
-            audioRecorder = try AVAudioRecorder(url: audioURL, settings: settings)
-            audioRecorder?.delegate = self
-            audioRecorder?.isMeteringEnabled = true
-            audioRecorder?.prepareToRecord()
-            audioRecorder?.record()
-            
-            isRecording = true
-            recordingDuration = 0
-            
-            // Start timer for recording duration
-            recordingTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
-                self?.updateRecordingDuration()
-            }
-            
-            print("Started recording: \(fileName)")
-        } catch {
-            print("Failed to start recording: \(error)")
-        }
-    }
-    
-    private func stopRecording() {
-        guard isRecording else { return }
-        
-        audioRecorder?.stop()
-        recordingTimer?.invalidate()
-        recordingTimer = nil
-        isRecording = false
-        
-        print("Stopped recording")
-    }
-    
-    private func updateRecordingDuration() {
-        guard let recorder = audioRecorder, recorder.isRecording else { return }
-        recordingDuration = recorder.currentTime
+        Self.removeLegacyAudioDirectory()
     }
     
     // MARK: - Persistence
@@ -341,7 +261,8 @@ class ScreenAssistantManager: NSObject, ObservableObject {
             return
         }
         
-        attachedFiles = decoded
+        // Voice recordings had no file URL; voice questions are gone.
+        attachedFiles = decoded.filter { $0.fileURL != nil }
     }
     
     // MARK: - Chat Management
@@ -389,8 +310,7 @@ class ScreenAssistantManager: NSObject, ObservableObject {
     }
     
     private func sendToGeminiAPI(message: String, files: [ScreenAssistantFile]) {
-        let apiKey = Defaults[.geminiApiKey]
-        guard !apiKey.isEmpty else {
+        guard let apiKey = ScreenAssistantKeys.key(for: .gemini) else {
             print("❌ ScreenAssistant: No Gemini API key configured")
             addAssistantMessage("Error: No Gemini API key configured. Please set your API key in model settings.")
             isLoading = false
@@ -401,19 +321,24 @@ class ScreenAssistantManager: NSObject, ObservableObject {
         let selectedModel = Defaults[.selectedAIModel] ?? AIModel(id: "gemini-2.5-flash", name: "Gemini 2.5 Flash", supportsThinking: true)
         let modelId = selectedModel.id
         
-        guard let url = URL(string: "https://generativelanguage.googleapis.com/v1beta/models/\(modelId):generateContent?key=\(apiKey)") else {
+        // The key goes in a header, never in the address.
+        guard let url = URL(string: "https://generativelanguage.googleapis.com/v1beta/models/\(modelId):generateContent") else {
             print("❌ ScreenAssistant: Invalid Gemini API URL")
             addAssistantMessage("Error: Invalid API URL")
             isLoading = false
             return
         }
         
-        performAPIRequest(url: url, requestBody: buildGeminiRequestBody(message: message, files: files), provider: .gemini)
+        performAPIRequest(
+            url: url,
+            requestBody: buildGeminiRequestBody(message: message, files: files),
+            provider: .gemini,
+            headers: ["x-goog-api-key": apiKey]
+        )
     }
     
     private func sendToOpenAIAPI(message: String, files: [ScreenAssistantFile]) {
-        let apiKey = Defaults[.openaiApiKey]
-        guard !apiKey.isEmpty else {
+        guard let apiKey = ScreenAssistantKeys.key(for: .openai) else {
             print("❌ ScreenAssistant: No OpenAI API key configured")
             addAssistantMessage("Error: No OpenAI API key configured. Please set your API key in model settings.")
             isLoading = false
@@ -435,8 +360,7 @@ class ScreenAssistantManager: NSObject, ObservableObject {
     }
 
     private func sendToGroqAPI(message: String, files: [ScreenAssistantFile]) {
-        let apiKey = Defaults[.groqApiKey]
-        guard !apiKey.isEmpty else {
+        guard let apiKey = ScreenAssistantKeys.key(for: .groq) else {
             print("❌ ScreenAssistant: No Groq API key configured")
             addAssistantMessage("Error: No Groq API key configured. Please set your API key in model settings.")
             isLoading = false
@@ -469,8 +393,7 @@ class ScreenAssistantManager: NSObject, ObservableObject {
     }
     
     private func sendToClaudeAPI(message: String, files: [ScreenAssistantFile]) {
-        let apiKey = Defaults[.claudeApiKey]
-        guard !apiKey.isEmpty else {
+        guard let apiKey = ScreenAssistantKeys.key(for: .claude) else {
             print("❌ ScreenAssistant: No Claude API key configured")
             addAssistantMessage("Error: No Claude API key configured. Please set your API key in model settings.")
             isLoading = false
@@ -667,10 +590,13 @@ class ScreenAssistantManager: NSObject, ObservableObject {
     
     // MARK: - API Request Performers
     
-    private func performAPIRequest(url: URL, requestBody: [String: Any], provider: AIModelProvider) {
+    private func performAPIRequest(url: URL, requestBody: [String: Any], provider: AIModelProvider, headers: [String: String] = [:]) {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+        for (field, value) in headers {
+            request.addValue(value, forHTTPHeaderField: field)
+        }
         
         do {
             let jsonData = try JSONSerialization.data(withJSONObject: requestBody, options: .prettyPrinted)
@@ -1262,42 +1188,4 @@ class ScreenAssistantManager: NSObject, ObservableObject {
             addAssistantMessage("❌ **Claude Error**\n\nAn unknown error occurred with Claude.")
         }
     }
-}
-
-// MARK: - AVAudioRecorderDelegate
-
-extension ScreenAssistantManager: AVAudioRecorderDelegate {
-    func audioRecorderDidFinishRecording(_ recorder: AVAudioRecorder, successfully flag: Bool) {
-        isRecording = false
-        recordingTimer?.invalidate()
-        recordingTimer = nil
-        
-        if flag {
-            let fileName = recorder.url.lastPathComponent
-            let displayName = "Recording \(DateFormatter.shortTime.string(from: Date()))"
-            let audioFile = ScreenAssistantFile(audioFileName: fileName, name: displayName)
-            attachedFiles.append(audioFile)
-            saveFilesToDefaults()
-            print("Recording saved: \(fileName)")
-        } else {
-            print("Recording failed")
-        }
-    }
-    
-    func audioRecorderEncodeErrorDidOccur(_ recorder: AVAudioRecorder, error: Error?) {
-        print("Recording encode error: \(error?.localizedDescription ?? "Unknown error")")
-        isRecording = false
-        recordingTimer?.invalidate()
-        recordingTimer = nil
-    }
-}
-
-// MARK: - DateFormatter Extension
-
-extension DateFormatter {
-    static let shortTime: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.timeStyle = .short
-        return formatter
-    }()
 }

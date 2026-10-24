@@ -145,6 +145,8 @@ PrivateWorks
 !tests/test_network_allowlist.py
 !tests/test_localization.py
 !tests/test_permission_prompts.py
+!tests/test_energy.py
+!tests/test_window_hosting.py
 *.sh
 comparison_report.json
 *.txt
@@ -176,10 +178,30 @@ Config/Local.xcconfig
 
 # The release script is part of the project (the rule above ignores *.sh).
 !scripts/make-release.sh
+!scripts/reinstall-clean.sh
+# So are the energy measurement and bisect scripts, and their results.
+!scripts/perf/*.sh
+!docs/perf/*.txt
+!docs/perf/**/*.txt
 
 # Pinned dependency versions belong to the project (the swiftpm/ rule above ignores them).
 !DynamicIsland.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/
 !DynamicIsland.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
 
-# Private tooling in docs/ (never exported) is part of this repository.
-!docs/tools/*.py
+
+# Private data types: never in git
+tests/fixtures/private/
+.env
+.env.*
+*.eml
+*.mbox
+*.pem
+*.p12
+*.key
+*.sqlite
+*.db
+*.keychain*
+
+# Claude Code agent memory (local notes of review and measurement agents)
+.claude/agent-memory/
+.claude/test-logs/

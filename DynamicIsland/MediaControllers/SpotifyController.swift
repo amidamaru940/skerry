@@ -48,6 +48,8 @@ class SpotifyController: MediaControllerProtocol {
     private let commandUpdateDelay: Duration
     private let commandExecutor: (String) async -> Void
     private let playbackInfoFetcher: () async throws -> NSAppleEventDescriptor?
+    /// The same read for `refreshAfterClick`, through the check that may ask.
+    private let clickedPlaybackInfoFetcher: () async throws -> NSAppleEventDescriptor?
 
     private var lastArtworkURL: String?
     private var artworkFetchTask: Task<Void, Never>?
@@ -68,12 +70,15 @@ class SpotifyController: MediaControllerProtocol {
     ) {
         self.commandUpdateDelay = commandUpdateDelay
         self.commandExecutor = commandExecutor ?? Self.executeSpotifyCommand
-        self.playbackInfoFetcher = playbackInfoFetcher ?? Self.fetchSpotifyPlaybackInfo
+        self.playbackInfoFetcher = playbackInfoFetcher ?? { try await Self.fetchSpotifyPlaybackInfo(afterClick: false) }
+        self.clickedPlaybackInfoFetcher = playbackInfoFetcher ?? Self.fetchSpotifyPlaybackInfoAfterClick
 
         guard startsObservers else { return }
 
         setupPlaybackStateChangeObserver()
         setupSessionChangeObserver()
+        // Reads Spotify only once macOS allows it (AutomationConsent): a read
+        // nobody clicked for must not bring up the Automation question.
         Task {
             if isActive() {
                 await updatePlaybackInfo()
@@ -144,7 +149,10 @@ class SpotifyController: MediaControllerProtocol {
     }
 
     func isActive() -> Bool {
-        NSWorkspace.shared.runningApplications.contains { $0.bundleIdentifier == playbackState.bundleIdentifier }
+        // The fixed identifier, not playbackState's: this runs off the main
+        // actor (Auto's refresh) while the @Published state is replaced on main,
+        // and reading it per running app raced into a crash.
+        NSWorkspace.shared.runningApplications.contains { $0.bundleIdentifier == Self.bundleIdentifier }
     }
 
     // MARK: - Favouriting
@@ -172,7 +180,24 @@ class SpotifyController: MediaControllerProtocol {
     }
 
     func updatePlaybackInfo() async {
-        guard let descriptor = try? await fetchPlaybackInfoAsync() else { return }
+        await updatePlaybackInfo(using: playbackInfoFetcher)
+    }
+
+    /// The read after a click that needs Spotify but sends it nothing itself:
+    /// a control in Auto while macOS reports Spotify, choosing Spotify as the
+    /// source, «Open player» (§5.8). It goes through the check that may ask,
+    /// so on a Mac without an answer this is when the question comes up; after
+    /// a yes the ordinary reads take over. Nothing to do once Spotify is
+    /// allowed, nor while it is closed: the read would launch it.
+    /// - Parameter launched: Skerry has just opened Spotify, which
+    ///   `isActive()` may not show yet.
+    func refreshAfterClick(launched: Bool = false) async {
+        guard launched || isActive(), AutomationConsent.spotify.status != .allowed else { return }
+        await updatePlaybackInfo(using: clickedPlaybackInfoFetcher)
+    }
+
+    private func updatePlaybackInfo(using fetcher: () async throws -> NSAppleEventDescriptor?) async {
+        guard let descriptor = try? await fetcher() else { return }
         guard descriptor.numberOfItems >= 11 else { return }
 
         let isPlaying = descriptor.atIndex(1)?.booleanValue ?? false
@@ -342,7 +367,10 @@ class SpotifyController: MediaControllerProtocol {
         await commandExecutor(command)
     }
 
+    /// Every command comes from a click on a player control or a media key,
+    /// which is when macOS may ask about Spotify.
     private static func executeSpotifyCommand(_ command: String) async {
+        guard await AutomationConsent.spotify.allowsClickedEvent() else { return }
         let script = "tell application \"Spotify\" to \(command)"
         try? await AppleScriptHelper.executeVoid(script)
     }
@@ -353,11 +381,20 @@ class SpotifyController: MediaControllerProtocol {
         await updatePlaybackInfo()
     }
 
-    private func fetchPlaybackInfoAsync() async throws -> NSAppleEventDescriptor? {
-        try await playbackInfoFetcher()
+    private static func fetchSpotifyPlaybackInfoAfterClick() async throws -> NSAppleEventDescriptor? {
+        try await fetchSpotifyPlaybackInfo(afterClick: true)
     }
 
-    private static func fetchSpotifyPlaybackInfo() async throws -> NSAppleEventDescriptor? {
+    /// Nobody clicked for a read (launch, a change Spotify posted, the island
+    /// opening), so it never asks: until Spotify is allowed, Auto shows it
+    /// through the system Now Playing. Only `refreshAfterClick` reads after a
+    /// click, and that read may ask.
+    private static func fetchSpotifyPlaybackInfo(afterClick: Bool) async throws -> NSAppleEventDescriptor? {
+        let consent = AutomationConsent.spotify
+        let allowed = afterClick
+            ? await consent.allowsClickedEvent()
+            : await consent.allowsUnclickedEvent()
+        guard allowed else { return nil }
         let script = """
         tell application "Spotify"
             set isRunning to true

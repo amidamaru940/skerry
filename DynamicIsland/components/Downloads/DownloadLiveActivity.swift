@@ -62,6 +62,43 @@ struct DownloadLiveActivity: View {
         .accentColor
     }
     
+    /// The row's three parts. The wings differ, but the centre grows by
+    /// exactly what the trailing wing has over the leading one, so the
+    /// trailing wing still starts at the camera's edge (E §2.1).
+    static func closedGeometry(
+        closedNotchWidth: CGFloat,
+        notchHeight: CGFloat,
+        isHovering: Bool,
+        gestureProgress: CGFloat,
+        isDownloading: Bool,
+        speedText: String?
+    ) -> ClosedWingGeometry {
+        let allowance = speedText == nil ? 0 : speedAllowance
+        let leading = max(0, notchHeight - (isHovering ? 0 : 12) + gestureProgress / 2)
+        let trailing = max(60, notchHeight) + allowance
+        // The rate, 6, the 40 pt bar and 6 to the wall.
+        let speed = speedText.map { ClosedWingE.measure($0, font: .monospacedDigitSystemFont(ofSize: 10, weight: .medium)) + 6 } ?? 0
+        return ClosedWingGeometry(
+            leadingWing: leading,
+            middle: closedNotchWidth + (isHovering ? 8 : 0) + (isDownloading ? 40 : 0) + allowance,
+            trailingWing: trailing,
+            leadingContent: leading,
+            trailingContent: speed + 40 + 6,
+            camera: ClosedWingE.cameraWidth(closedNotchWidth: closedNotchWidth)
+        )
+    }
+
+    private var geometry: ClosedWingGeometry {
+        Self.closedGeometry(
+            closedNotchWidth: vm.closedNotchSize.width,
+            notchHeight: vm.effectiveClosedNotchHeight,
+            isHovering: isHovering,
+            gestureProgress: gestureProgress,
+            isDownloading: downloadManager.isDownloading,
+            speedText: speedText
+        )
+    }
+
     var body: some View {
         HStack(spacing: 0) {
             // Left side: download icon capsule
@@ -86,19 +123,14 @@ struct DownloadLiveActivity: View {
                     }
                 }
                 .frame(
-                    width: isExpanded ? max(0, vm.effectiveClosedNotchHeight - (isHovering ? 0 : 12) + gestureProgress / 2) : 0,
+                    width: isExpanded ? geometry.leadingWing : 0,
                     height: vm.effectiveClosedNotchHeight - (isHovering ? 0 : 12)
                 )
             
             // Center: closed notch body (slightly wider during downloads)
             Rectangle()
                 .fill(.black)
-                .frame(
-                    width: vm.closedNotchSize.width
-                        + (isHovering ? 8 : 0)
-                        + (downloadManager.isDownloading ? 40 : 0)
-                        + speedAllowance
-                )
+                .frame(width: geometry.middle)
                 .animation(.smooth(duration: 0.25), value: speedAllowance)
             
             // Right side: indeterminate-style progress bar
@@ -125,7 +157,7 @@ struct DownloadLiveActivity: View {
                                     }
 
                                     if indicatorStyle == .circle {
-                                        SpinningCircleDownloadView()
+                                        SpinningCircleDownloadView(isSpinning: !downloadManager.isStalled)
                                     } else {
                                         ProgressView()
                                             .progressViewStyle(.linear)
@@ -141,7 +173,7 @@ struct DownloadLiveActivity: View {
                     }
                 }
                 .frame(
-                    width: isExpanded ? max(60, vm.effectiveClosedNotchHeight) + speedAllowance : 0,
+                    width: isExpanded ? geometry.trailingWing : 0,
                     height: vm.effectiveClosedNotchHeight - (isHovering ? 0 : 12)
                 )
                 .animation(.smooth(duration: 0.25), value: speedAllowance)

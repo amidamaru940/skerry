@@ -102,6 +102,23 @@ final class IslandHeaderTests: XCTestCase {
         XCTAssertEqual(IslandMoreMenu.entries(for: nothing), [.settings])
     }
 
+    func testOnTheBufferTheMenuClearsTheHistory() {
+        // Buffer v3 (Q26): the tab's own «…» is gone; «Очистить историю» heads
+        // the island's menu on «Буфер», a hairline under it, no question.
+        var buffer = IslandMoreMenu.Features()
+        buffer.clipboardHistoryCount = 14
+        let entries = IslandMoreMenu.entries(for: buffer)
+        XCTAssertEqual(entries, [.clearClipboardHistory(count: 14), .keepAwake, .colorPicker, .clipboardPause(paused: false), .settings])
+        XCTAssertTrue(IslandMoreMenu.startsSection(entries, at: 1), "a hairline under «Очистить историю»")
+        XCTAssertFalse(IslandMoreMenu.startsSection(entries, at: 2))
+        XCTAssertTrue(IslandMoreMenu.startsSection(entries, at: entries.count - 1), "and above Settings")
+        XCTAssertNil(IslandMoreMenu.panel(for: .clearClipboardHistory(count: 14)), "it acts at once")
+
+        var off = buffer
+        off.clipboard = false
+        XCTAssertFalse(IslandMoreMenu.entries(for: off).contains(.clearClipboardHistory(count: 14)), "no clipboard, nothing to clear")
+    }
+
     func testEntriesOpenTheirPanelInPlaceOrActAtOnce() {
         XCTAssertEqual(IslandMoreMenu.panel(for: .keepAwake), .keepAwake)
         XCTAssertEqual(IslandMoreMenu.panel(for: .colorPicker), .colorPicker)

@@ -111,22 +111,15 @@ struct TabSelectionView: View {
         return tabsArray
     }
     var body: some View {
-        HStack(spacing: DS.Space.xs) {
-            ForEach(tabs) { tab in
-                TabButton(
-                    label: tab.label,
-                    icon: tab.icon,
-                    selected: isSelected(tab),
-                    badge: tab.badge,
-                    accent: tab.accentColor
-                ) {
-                    withAnimation(DS.spring) {
-                        if tab.view == .extensionExperience {
-                            coordinator.selectedExtensionExperienceID = tab.experienceID
-                        }
-                        coordinator.currentView = tab.view
-                    }
+        // E: the tabs are words, the selected one white (VISUAL-E §2.2); no pill.
+        let tabs = tabs
+        WordTabs(items: tabs.map(wordItem)) { item in
+            guard let tab = tabs.first(where: { $0.id == item.id }) else { return }
+            withAnimation(DS.spring) {
+                if tab.view == .extensionExperience {
+                    coordinator.selectedExtensionExperienceID = tab.experienceID
                 }
+                coordinator.currentView = tab.view
             }
         }
         .onAppear {
@@ -140,6 +133,20 @@ struct TabSelectionView: View {
         .onChange(of: itemIDs(for: .screenshots)) { markCurrentTabSeen() }
         .onChange(of: itemIDs(for: .clipboard)) { markCurrentTabSeen() }
         .onChange(of: itemIDs(for: .shelf)) { markCurrentTabSeen() }
+    }
+
+    private func wordItem(_ tab: TabModel) -> WordTabItem {
+        WordTabItem(
+            id: tab.id,
+            // The header word is short: «Сейчас», not «Сейчас воспроизводится».
+            title: tab.view == .home ? String(localized: "Now") : tab.label,
+            symbol: tab.icon,
+            isSelected: isSelected(tab),
+            hasNew: tab.badge == .new,
+            // Paused history shows in the header's status zone; the tooltip
+            // still says it.
+            help: tab.badge == .paused ? "\(tab.label) — \(String(localized: "Clipboard history paused"))" : nil
+        )
     }
 
     /// The items of a tab, by identity, for the "new" dot.

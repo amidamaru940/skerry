@@ -1032,7 +1032,7 @@ struct LockScreenMusicPanel: View {
             registerInteraction()
             isAirPlayPopoverPresented.toggle()
             if isAirPlayPopoverPresented {
-                Task { await airPlayManager.refreshDevices() }
+                Task { await airPlayManager.refreshDevices(afterClick: true) }
             }
         }
         .accessibilityLabel("AirPlay")
@@ -1471,7 +1471,7 @@ struct LockScreenMusicPanel: View {
         if newState {
             routeManager.refreshDevices()
             if useMergedAirPlayOutput {
-                Task { await airPlayManager.refreshDevices() }
+                Task { await airPlayManager.refreshDevices(afterClick: true) }
             }
         }
 

@@ -1,6 +1,5 @@
 import Foundation
 import Security
-import Darwin
 
 enum KeychainReader {
     static func genericPassword(service: String, account: String? = nil) -> String? {
@@ -52,15 +51,12 @@ enum KeychainReader {
 
 }
 
-/// Claude Code uses Apple's `security` tool. Use the same identity for both reads
-/// and writes: updating a file-based Keychain secret resets its partition ACL to
-/// the writer's identity. A native Atoll write otherwise removes `apple-tool:` and
-/// makes Claude Code ask for access again at its next read.
+/// Claude Code keeps its login in the Keychain through Apple's `security` tool; read it
+/// through the same tool. Read-only: the item is Claude Code's, and there is no write
+/// path here. Updating a file-based Keychain secret resets its partition ACL to the
+/// writer's identity, so any write from Skerry would make Claude Code ask for access
+/// again at its next read.
 enum ClaudeKeychainStore {
-    // SecurityTool's interactive command buffer is 4096 bytes including its NUL.
-    // Reject an oversized command instead of silently truncating a credential.
-    static let maximumCommandBytes = 4095
-
     static func read(service: String, account: String?) -> String? {
         guard let account else { return nil }
         let result = run(arguments: ["find-generic-password", "-s", service, "-a", account, "-w"])
@@ -84,72 +80,23 @@ enum ClaudeKeychainStore {
         return secret
     }
 
-    static func update(service: String, account: String?, secret: String) -> OSStatus? {
-        guard let command = updateCommand(service: service, account: account, secret: secret) else {
-            return errSecParam
-        }
-        // -U is an upsert. Check for the original item immediately before writing
-        // so a removed credential is not normally recreated by a stale refresh.
-        // Scope by both service and account, as Claude Code does.
-        guard let account else { return errSecParam }
-        let existing = run(arguments: ["find-generic-password", "-s", service, "-a", account])
-        guard existing.status == 0 else { return errSecItemNotFound }
-        let result = run(arguments: ["-i"], input: command)
-        return result.status == 0 ? nil : errSecIO
-    }
-
-    /// The command goes through stdin, never a shell or the process argument list.
-    /// Quotes/backslashes use SecurityTool's own split_line syntax.
-    static func updateCommand(service: String, account: String?, secret: String) -> Data? {
-        guard let account,
-              let serviceArg = quote(service), let accountArg = quote(account),
-              let secretArg = quote(secret) else { return nil }
-        let data = Data("add-generic-password -U -s \(serviceArg) -a \(accountArg) -w \(secretArg)\n".utf8)
-        return data.count <= maximumCommandBytes ? data : nil
-    }
-
-    private static func quote(_ value: String) -> String? {
-        guard !value.contains("\0"), !value.contains("\n"), !value.contains("\r") else { return nil }
-        return "\"" + value.replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"") + "\""
-    }
-
-    /// Writes and closes stdin without allowing a vanished reader to terminate Atoll.
-    /// Descriptor-local suppression preserves signal handling elsewhere in the app.
-    static func writeInput(_ input: Data, to handle: FileHandle) -> Bool {
-        defer { try? handle.close() }
-        guard fcntl(handle.fileDescriptor, F_SETNOSIGPIPE, 1) != -1 else { return false }
-        do {
-            try handle.write(contentsOf: input)
-            return true
-        } catch {
-            // EPIPE and other write failures are operation failures, not success.
-            return false
-        }
-    }
-
-    private static func run(arguments: [String], input: Data? = nil) -> (status: Int32, output: Data) {
+    private static func run(arguments: [String]) -> (status: Int32, output: Data) {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
         process.arguments = arguments
         let output = Pipe()
-        let inputPipe = Pipe()
         process.standardOutput = output
-        // The interactive tool can echo malformed input in errors. Never log it.
+        // Errors can name the item. Never log them.
         process.standardError = FileHandle.nullDevice
-        process.standardInput = input == nil ? FileHandle.nullDevice : inputPipe.fileHandleForReading
+        process.standardInput = FileHandle.nullDevice
         do { try process.run() } catch { return (-1, Data()) }
-        // Only the child should retain a reader; otherwise its early exit can be
-        // hidden by our own read descriptor and the write may incorrectly succeed.
-        try? inputPipe.fileHandleForReading.close()
         let timeout = DispatchWorkItem {
             if process.isRunning { process.terminate() }
         }
         DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 15, execute: timeout)
         defer { timeout.cancel() }
-        let inputSucceeded = input.map { writeInput($0, to: inputPipe.fileHandleForWriting) } ?? true
         let data = output.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
-        return (inputSucceeded ? process.terminationStatus : -1, data)
+        return (process.terminationStatus, data)
     }
 }

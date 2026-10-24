@@ -16,6 +16,7 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
+import Defaults
 import XCTest
 
 @testable import Atoll
@@ -204,6 +205,17 @@ final class DownloadScanSequenceTests: XCTestCase {
 
     private func makeManager() -> DownloadManager {
         DownloadManager(monitoringDisabledForTesting: true)
+    }
+
+    /// §5.8: the listener is on by default, so a fresh install waits until
+    /// Downloads was opened after the person asked for it (the switch turned
+    /// on, or folder access requested in Shelf settings).
+    func testTheListenerWatchesOnlyOnceDownloadsWasAskedFor() {
+        XCTAssertTrue(DownloadManager.watches(listenerOn: true, folderTouched: true))
+        XCTAssertFalse(DownloadManager.watches(listenerOn: true, folderTouched: false), "a fresh install at launch")
+        XCTAssertFalse(DownloadManager.watches(listenerOn: false, folderTouched: true))
+        XCTAssertTrue(Defaults.Keys.enableDownloadListener.defaultValue)
+        XCTAssertFalse(Defaults.Keys.downloadsFolderTouched.defaultValue)
     }
 
     /// Firefox: an empty destination appears first and the bytes go to the

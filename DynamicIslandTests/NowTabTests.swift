@@ -150,6 +150,7 @@ final class NowTabTests: XCTestCase {
             ("next-no-access", AnyView(NextEventsCardContent(state: .noAccess, now: now)), CGSize(width: 600, height: 92)),
             ("idle-strip", AnyView(IdlePlayerStripContent(artwork: NSImage(systemSymbolName: "music.note", accessibilityDescription: nil), title: "Nightcall", artist: "Kavinsky")), CGSize(width: 600, height: 36)),
             ("idle-strip-empty", AnyView(IdlePlayerStripContent(artwork: nil, title: nil, artist: "")), CGSize(width: 600, height: 36)),
+            ("idle-strip-held", AnyView(IdlePlayerStripContent(artwork: nil, title: "Nightcall", artist: "Kavinsky", controlsNote: "Controls are with a video in Chrome")), CGSize(width: 600, height: 36)),
         ]
         let folder = ProcessInfo.processInfo.environment["SKERRY_SNAPSHOT_DIR"].map { URL(fileURLWithPath: $0) }
         for (name, view, size) in pieces {
@@ -161,6 +162,16 @@ final class NowTabTests: XCTestCase {
                 try png.write(to: folder.appendingPathComponent("\(name).png"))
             }
         }
+    }
+
+    /// While a video holds the controls, «Возобновить» says so instead of the
+    /// artist and does nothing, as the player does: it looked live and
+    /// silently did nothing (23.10).
+    func testTheIdleStripSaysWhenAVideoHoldsTheControls() {
+        let held = IdlePlayerStripContent(artwork: nil, title: "Nightcall", artist: "Kavinsky", controlsNote: "Controls are with a video in Chrome")
+        XCTAssertEqual(held.subtitle, "Controls are with a video in Chrome")
+        let free = IdlePlayerStripContent(artwork: nil, title: "Nightcall", artist: "Kavinsky")
+        XCTAssertTrue(free.subtitle.hasPrefix("Kavinsky · "))
     }
 
     // MARK: Compact (owner's choice, 15.10): "Next" beside the one-row player

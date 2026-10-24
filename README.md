@@ -12,22 +12,14 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0-blue" alt="GPL-3.0"></a>
-  <img src="https://img.shields.io/badge/macOS-15%2B-black" alt="macOS 15+">
-  <img src="https://img.shields.io/badge/Apple%20silicon-native-black" alt="Apple silicon">
+  <img src="https://img.shields.io/badge/macOS-14.6%2B-black" alt="macOS 14.6+">
+  <img src="https://img.shields.io/badge/Apple%20silicon-only-black" alt="Apple silicon only">
   <a href="README.ru.md">Русский</a>
-</p>
-
-<p align="center">
-  <img src="assets/readme/compact.png" width="820" alt="Skerry: the player in one row, with the next event beside it">
 </p>
 
 ## Why Skerry
 
 **Screenshots in batches.** Take a few screenshots as usual (⇧⌘3, ⇧⌘4, ⇧⌘5). They collect into one batch at the notch, and **Paste into Claude · 3** drops the whole batch into the app you were working in. You can pick which shots go, drag the batch anywhere, mark a shot up, or AirDrop it. Optionally, shots taken straight to the clipboard (⌃⇧⌘3/4) join the batch too. They live in a temporary folder and are gone within a day.
-
-<p align="center">
-  <img src="assets/readme/batch.png" width="820" alt="Skerry: a screenshot batch at the notch with Paste into Claude, above the clipboard">
-</p>
 
 **A clipboard history you can trust.**
 - Everything you copy shows up as a card, with search, filters and pins.
@@ -46,10 +38,6 @@
 - **English and Russian**.
 - While your screen is shared or recorded, the clipboard and screenshots show only their titles, and the notch keeps quiet.
 
-<p align="center">
-  <img src="assets/readme/shelf.png" width="820" alt="Skerry: the shelf, with AirDrop and a place to drop files">
-</p>
-
 ## Privacy
 
 By default Skerry **sends nothing over the network and listens on no port**.
@@ -67,21 +55,58 @@ Every network address in the source is listed in [`tests/network_allowlist.txt`]
 | AI usage (Claude, Codex, Cursor…) | tokens from your keychain → those services |
 | Third-party extensions, LocalSend, Quick Share | a local port on this Mac / your local network |
 
-Software updates (Sparkle) are switched off. The camera "mirror" has no camera entitlement.
+Clipboard history is kept in memory only, unless you turn on saving. Screenshots taken to the clipboard are kept as files in a temporary folder and deleted within a day. There is no analytics. Software updates (Sparkle) are switched off, so there are no auto-updates. The camera "mirror" has no camera entitlement.
+
+## Requirements
+
+- A Mac with Apple silicon (M1 or newer). The build is arm64 only.
+- macOS 14.6 or newer.
+- Made for MacBooks with a notch. On screens without one Skerry shows a floating island instead (tested only on a notched MacBook Pro).
 
 ## Install
 
-1. Download `Skerry-<version>.dmg` from [Releases](../../releases) and drag **Skerry** to Applications.
-2. Skerry is free and not notarized: the developer has no paid Apple account. macOS will block the first launch. Open **System Settings → Privacy & Security** and click **Open Anyway** next to Skerry.
-3. Allow **Accessibility** when asked. It lets Skerry paste into other apps in one click.
+1. Download `Skerry-<version>.dmg` from [Releases](../../releases), drag **Skerry** to Applications and open it.
+2. macOS says it cannot verify the developer. Open **System Settings → Privacy & Security** and click **Open Anyway** next to Skerry.
+3. Optional check of the download: `shasum -a 256 -c Skerry-<version>.dmg.sha256` (run it next to the `.sha256` file).
 
-Each release is signed ad hoc, so macOS treats every update as a new app. After updating, switch Accessibility for Skerry off and on again. Building from source with your own Apple ID avoids this (see below).
+## Permissions
 
-To check a download, compare it with the `.sha256` file next to it: `shasum -a 256 -c Skerry-<version>.dmg.sha256`.
+Each one is asked only when the feature needs it.
+
+| Permission | Why |
+|---|---|
+| Accessibility | press ⌘V to paste screenshots into the app in front; catch volume and brightness keys for Skerry's own HUD |
+| Calendar | show upcoming events |
+| Automation (Music, Spotify) | player controls |
+| Screenshot folder access | collect screenshots taken to a folder (screenshots taken to the clipboard need none) |
+
+## Security
+
+- Skerry is free and signed ad hoc. It is **not notarized** by Apple (no paid developer account), so macOS warns on first launch.
+- Every update is a new app to macOS. After updating, allow Accessibility again.
+- Because of the ad-hoc signature the app has to allow loading its own embedded frameworks (`disable-library-validation`). A notarized Developer ID build would not need it.
+- Download Skerry only from this repository's Releases.
+- Report vulnerabilities privately: see [SECURITY.md](SECURITY.md).
+
+## Update
+
+Download the new DMG, replace Skerry in Applications, then allow Accessibility again.
+
+## Uninstall
+
+1. Optional, before deleting the app: reset its permissions.
+   ```bash
+   tccutil reset All io.github.amidamaru940.skerry
+   ```
+2. Quit Skerry and delete these:
+   - `/Applications/Skerry.app`
+   - `~/Library/Preferences/io.github.amidamaru940.skerry.plist`
+   - `~/Library/Application Support/io.github.amidamaru940.skerry`
+   - the temporary folder `Skerry clipboard screenshots` inside `$TMPDIR` (`open "$TMPDIR"` shows it)
 
 ## Build from source
 
-You need macOS 15 or later and a recent Xcode (Swift 6.1 or later).
+You need Xcode (Swift 6.1 or later).
 
 ```bash
 git clone https://github.com/amidamaru940/skerry.git
@@ -96,15 +121,15 @@ DEVELOPMENT_TEAM = ABCDE12345
 CODE_SIGN_IDENTITY = Apple Development
 ```
 
-- **Release DMG:** `scripts/make-release.sh` builds it with Xcode and macOS tools only.
+- **Release DMG:** `scripts/make-release.sh` builds the ad-hoc signed DMG with Xcode and macOS tools only.
 - **Tests:** `xcodebuild test -scheme DynamicIsland -destination 'platform=macOS'` and `python3 -m unittest discover tests`. The tests make no network requests and never touch your real settings.
 
 ## Credits
 
 Skerry is a fork of [**Atoll**](https://github.com/Ebullioscopic/Atoll) by Ebullioscopic and contributors, which builds on [**boring.notch**](https://github.com/TheBoredTeam/boring.notch). Thank you for the foundation.
 
-Skerry is independent and is not affiliated with Apple, the Atoll project or Mercedes-AMG. See [NOTICE](NOTICE) and [TRADEMARKS](TRADEMARKS).
+Skerry is independent and is not affiliated with Apple or the Atoll project. See [NOTICE](NOTICE) and [TRADEMARKS](TRADEMARKS).
 
 ## License
 
-[GNU General Public License v3.0](LICENSE), like Atoll and boring.notch.
+GPL-3.0-or-later: [GNU General Public License v3.0](LICENSE), like Atoll and boring.notch. Skerry is a fork of Atoll (see [NOTICE](NOTICE)). The source is this repository.

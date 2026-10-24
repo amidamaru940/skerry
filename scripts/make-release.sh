@@ -27,9 +27,11 @@ mkdir -p "$OUT"
 # debug symbols below (their map names every object file in the build
 # folder), so the release does not carry the builder's home. The code uses
 # #fileID, not #file, for the same reason (tests/test_fork_configuration.py).
+# xcodebuild splits these list settings on spaces unless an item is quoted,
+# and the checkout may sit in a folder with a space (a space in a folder name).
 ROOT_ABS="$(pwd -P)"
-SWIFT_MAP="-file-prefix-map $ROOT_ABS=. -file-prefix-map $HOME=~"
-C_MAP="-ffile-prefix-map=$ROOT_ABS=. -ffile-prefix-map=$HOME=~"
+SWIFT_MAP="-file-prefix-map \"$ROOT_ABS=.\" -file-prefix-map \"$HOME=~\""
+C_MAP="\"-ffile-prefix-map=$ROOT_ABS=.\" \"-ffile-prefix-map=$HOME=~\""
 
 echo "Building $APP_NAME $VERSION (Release, ad-hoc signed)…"
 # The command line wins over Config/Local.xcconfig: a release is always
@@ -65,6 +67,10 @@ STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 ditto "$APP" "$STAGE/$APP_NAME.app"
 ln -s /Applications "$STAGE/Applications"
+# The licenses travel with the app (GPL-3.0 for Skerry, BSD-3-Clause for
+# mediaremote-adapter: see NOTICE).
+cp LICENSE "$STAGE/LICENSE.txt"
+cp NOTICE "$STAGE/NOTICE.txt"
 rm -f "$DMG"
 hdiutil create -volname "$APP_NAME $VERSION" -srcfolder "$STAGE" -fs HFS+ -format UDZO -ov "$DMG" >/dev/null
 # Only the file name in the checksum line: it is published next to the DMG.

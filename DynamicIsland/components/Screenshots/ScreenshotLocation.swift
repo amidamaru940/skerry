@@ -93,6 +93,34 @@ enum TemporaryClipboardShots {
         return path.hasPrefix(root + "/")
     }
 
+    /// The folder's path as written and with its links resolved (/var is
+    /// /private/var), worked out once: `holds` runs for every screenshot on
+    /// every redraw of the panel.
+    private static let defaultRoots = roots(of: folder)
+
+    static func roots(of folder: URL) -> [String] {
+        let written = folder.standardizedFileURL.path
+        let resolved = folder.standardizedFileURL.resolvingSymlinksInPath().path
+        return written == resolved ? [written] : [written, resolved]
+    }
+
+    /// Whether `path` lies in the folder, by its text alone: `path` itself
+    /// is never looked up on disk, so a screenshot path on the Desktop is
+    /// never touched before macOS was asked for it (§5.8). Only the
+    /// temporary folder's links are resolved, once.
+    static func holds(path: String) -> Bool {
+        holds(path: path, roots: defaultRoots)
+    }
+
+    static func holds(path: String, in folder: URL) -> Bool {
+        holds(path: path, roots: roots(of: folder))
+    }
+
+    private static func holds(path: String, roots: [String]) -> Bool {
+        let standardized = URL(fileURLWithPath: path, isDirectory: false).standardizedFileURL.path
+        return roots.contains { standardized.hasPrefix($0 + "/") }
+    }
+
     static func remove(_ urls: [URL], in folder: URL = folder) {
         for url in urls where isTemporary(url, in: folder) {
             try? FileManager.default.removeItem(at: url)

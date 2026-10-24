@@ -272,10 +272,8 @@ final class FullScreenArtworkWindowManager: ObservableObject {
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Application Support/com.apple.wallpaper/Store/Index.plist")
     }()
-    private let backupPlistURL: URL = {
-        FileManager.default.temporaryDirectory
-            .appendingPathComponent("atoll_wallpaper_backup.plist")
-    }()
+    private let backupPlistURL = FullScreenArtworkWindowManager.backupFolder
+        .appendingPathComponent(FullScreenArtworkWindowManager.BackupName.plist)
     private let aerialManifestURL: URL = {
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Application Support/com.apple.wallpaper/aerials/manifest/entries.json")
@@ -288,19 +286,153 @@ final class FullScreenArtworkWindowManager: ObservableObject {
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Application Support/com.apple.wallpaper/aerials/thumbnails", isDirectory: true)
     }()
-    private let customLiveWallpaperAssetID = "6D6834A4-2F0F-479A-B053-7D4DC5CB8EB7"
-    private let liveWallpaperManifestBackupURL: URL = {
-        FileManager.default.temporaryDirectory
-            .appendingPathComponent("atoll_aerial_manifest_backup.json")
-    }()
-    private let liveWallpaperVideoBackupURL: URL = {
-        FileManager.default.temporaryDirectory
-            .appendingPathComponent("atoll_aerial_video_backup.mov")
-    }()
-    private let liveWallpaperThumbnailBackupURL: URL = {
-        FileManager.default.temporaryDirectory
-            .appendingPathComponent("atoll_aerial_thumbnail_backup.png")
-    }()
+    nonisolated static let customLiveWallpaperAssetID = "6D6834A4-2F0F-479A-B053-7D4DC5CB8EB7"
+    private let liveWallpaperManifestBackupURL = FullScreenArtworkWindowManager.backupFolder
+        .appendingPathComponent(FullScreenArtworkWindowManager.BackupName.manifest)
+    private let liveWallpaperVideoBackupURL = FullScreenArtworkWindowManager.backupFolder
+        .appendingPathComponent(FullScreenArtworkWindowManager.BackupName.video)
+    private let liveWallpaperThumbnailBackupURL = FullScreenArtworkWindowManager.backupFolder
+        .appendingPathComponent(FullScreenArtworkWindowManager.BackupName.thumbnail)
+
+    // MARK: - Backups and recovery after an unclean exit
+
+    /// The wallpaper files this feature rewrites are backed up here, in Skerry's own
+    /// data folder. They used to go to the temporary folder, which macOS empties on
+    /// restart: a crash while the artwork was shown, then a restart, lost the wallpaper.
+    nonisolated static var backupFolder: URL { AppDataDirectory.folder("Wallpaper backup") }
+    nonisolated private static let legacyBackupFolder = FileManager.default.temporaryDirectory
+    nonisolated enum BackupName {
+        static let plist = "atoll_wallpaper_backup.plist"
+        static let manifest = "atoll_aerial_manifest_backup.json"
+        static let video = "atoll_aerial_video_backup.mov"
+        static let thumbnail = "atoll_aerial_thumbnail_backup.png"
+    }
+
+    /// Run at launch, off the main thread, when LaunchRecoveryGate allows it (not in the
+    /// test host, not beside another running Skerry). A Skerry that crashed or was force-quit
+    /// while the artwork was shown left the wallpaper renderers frozen (SIGSTOP) and the
+    /// wallpaper store rewritten: nothing restored them before. Resumes the renderers
+    /// and, when a backup is left and the wallpaper is still Skerry's, puts it back.
+    nonisolated static func recoverAfterUncleanExit() {
+        ProcessSignals.continueProcesses(named: Set(wallpaperRenderProcessNames))
+        recoverWallpaper(
+            store: FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent("Library/Application Support/com.apple.wallpaper"),
+            backupFolders: recoveryBackupFolders,
+            restart: {
+                let restart = Process()
+                restart.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
+                restart.arguments = ["WallpaperAgent"]
+                restart.standardError = Pipe()
+                try? restart.run()
+            }
+        )
+    }
+
+    /// Where a launch looks for backups: Skerry's data folder, then the temporary
+    /// folder older builds used.
+    nonisolated static var recoveryBackupFolders: [URL] { [backupFolder, legacyBackupFolder] }
+
+    /// The wallpaper half of the recovery, against a wallpaper store (the folder that
+    /// holds Store/Index.plist and aerials/) and backup folders; tests pass their own.
+    nonisolated static func recoverWallpaper(store: URL, backupFolders: [URL], restart: () -> Void) {
+        let fm = FileManager.default
+        let assetID = customLiveWallpaperAssetID
+        let index = store.appendingPathComponent("Store/Index.plist")
+        // Index.plist goes back last: a stop half-way then leaves it Skerry's, and the
+        // next launch finishes the job instead of judging the other backups stale.
+        let targets: [(name: String, destination: URL)] = [
+            (BackupName.manifest, store.appendingPathComponent("aerials/manifest/entries.json")),
+            (BackupName.video, store.appendingPathComponent("aerials/videos/\(assetID).mov")),
+            (BackupName.thumbnail, store.appendingPathComponent("aerials/thumbnails/\(assetID).png")),
+            (BackupName.plist, index),
+        ]
+        let leftovers = backupFolders.flatMap { folder in
+            targets.compactMap { target -> (backup: URL, destination: URL)? in
+                let backup = folder.appendingPathComponent(target.name)
+                return fm.fileExists(atPath: backup.path) ? (backup, target.destination) : nil
+            }
+        }
+        guard !leftovers.isEmpty else { return }
+        // A store that cannot be read says nothing: the backups wait for a later launch.
+        guard let stillSkerrys = isSkerrysWallpaper(indexAt: index) else { return }
+        // A wallpaper the user chose after the crash is theirs: the backup is stale then.
+        for leftover in leftovers {
+            if stillSkerrys {
+                try? restoreBackup(leftover.backup, to: leftover.destination)
+            } else {
+                try? fm.removeItem(at: leftover.backup)
+            }
+        }
+        if stillSkerrys {
+            restart()
+        }
+    }
+
+    /// Whether the wallpaper on screen is still Skerry's artwork; nil when the store
+    /// cannot be read. A choice keeps its asset id or image URL in `Configuration`, a
+    /// binary plist of its own, so each one is decoded. The artwork PNG itself may be
+    /// gone after a restart: the choice still names it. SystemDefault only counts when
+    /// no other place holds a choice: Skerry patches it too, and a wallpaper picked in
+    /// System Settings after the crash leaves it as it was.
+    nonisolated static func isSkerrysWallpaper(indexAt index: URL) -> Bool? {
+        guard let data = try? Data(contentsOf: index),
+              let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any]
+        else { return nil }
+
+        // The places patchWallpaperEntries writes to, each with a Desktop and an Idle block.
+        func dictionaries(_ value: Any?) -> [[String: Any]] {
+            ((value as? [String: Any])?.values).map { $0.compactMap { $0 as? [String: Any] } } ?? []
+        }
+        func choices(in entries: [[String: Any]]) -> [[String: Any]] {
+            entries
+                .flatMap { entry in ["Desktop", "Idle"].compactMap { entry[$0] as? [String: Any] } }
+                .flatMap { block in (block["Content"] as? [String: Any])?["Choices"] as? [[String: Any]] ?? [] }
+        }
+        let spaces = dictionaries(plist["Spaces"])
+        var entries = [plist["AllSpacesAndDisplays"]].compactMap { $0 as? [String: Any] }
+        entries += dictionaries(plist["Displays"])
+        entries += spaces.compactMap { $0["Default"] as? [String: Any] }
+        entries += spaces.flatMap { dictionaries($0["Displays"]) }
+        var shown = choices(in: entries)
+        if shown.isEmpty {
+            shown = choices(in: [plist["SystemDefault"]].compactMap { $0 as? [String: Any] })
+        }
+
+        let configurations = shown
+            .compactMap { $0["Configuration"] as? Data }
+            .compactMap { try? PropertyListSerialization.propertyList(from: $0, format: nil) as? [String: Any] }
+
+        return configurations.contains { configuration in
+            if configuration["assetID"] as? String == customLiveWallpaperAssetID { return true }
+            guard let relative = (configuration["url"] as? [String: Any])?["relative"] as? String,
+                  let url = URL(string: relative)
+            else { return false }
+            return url.lastPathComponent.hasPrefix("atoll_artwork_wallpaper")
+        }
+    }
+
+    /// Puts a backup back in place of `destination`, then removes the backup. It is
+    /// copied next to the destination and swapped in, so a copy that fails leaves the
+    /// current file, and the backup, where they were.
+    nonisolated static func restoreBackup(_ backup: URL, to destination: URL) throws {
+        let fm = FileManager.default
+        let staged = destination.deletingLastPathComponent()
+            .appendingPathComponent(".\(destination.lastPathComponent).skerry-restore")
+        try? fm.removeItem(at: staged)
+        try fm.copyItem(at: backup, to: staged)
+        do {
+            if fm.fileExists(atPath: destination.path) {
+                _ = try fm.replaceItemAt(destination, withItemAt: staged)
+            } else {
+                try fm.moveItem(at: staged, to: destination)
+            }
+        } catch {
+            try? fm.removeItem(at: staged)
+            throw error
+        }
+        try fm.removeItem(at: backup)
+    }
     private var artworkFileURL: URL?
     private var cachedArtworkPNG: URL?
     private var cachedArtworkFingerprint: String?
@@ -449,7 +581,7 @@ final class FullScreenArtworkWindowManager: ObservableObject {
             }
     }
 
-    private static let wallpaperRenderProcessNames: [String] = [
+    nonisolated private static let wallpaperRenderProcessNames: [String] = [
         "WallpaperAgent",
         "WallpaperAerialsExtension",
         "WallpaperVideoExtension",
@@ -932,7 +1064,7 @@ final class FullScreenArtworkWindowManager: ObservableObject {
         }
         scheduleWallpaperTransitionHide(after: .milliseconds(420))
 
-        let assetID = customLiveWallpaperAssetID
+        let assetID = Self.customLiveWallpaperAssetID
         let manifestURL = aerialManifestURL
         let videosDirectoryURL = aerialVideosDirectoryURL
         let thumbnailsDirectoryURL = aerialThumbnailsDirectoryURL
@@ -1157,26 +1289,20 @@ final class FullScreenArtworkWindowManager: ObservableObject {
 
     private func restoreLiveWallpaperResources() {
         let fm = FileManager.default
-        let assetID = customLiveWallpaperAssetID
+        let assetID = Self.customLiveWallpaperAssetID
         let videoDestinationURL = aerialVideosDirectoryURL.appendingPathComponent("\(assetID).mov")
         let thumbnailDestinationURL = aerialThumbnailsDirectoryURL.appendingPathComponent("\(assetID).png")
 
         if fm.fileExists(atPath: liveWallpaperManifestBackupURL.path) {
-            try? fm.removeItem(at: aerialManifestURL)
-            try? fm.copyItem(at: liveWallpaperManifestBackupURL, to: aerialManifestURL)
-            try? fm.removeItem(at: liveWallpaperManifestBackupURL)
+            try? Self.restoreBackup(liveWallpaperManifestBackupURL, to: aerialManifestURL)
         }
 
         if fm.fileExists(atPath: liveWallpaperVideoBackupURL.path) {
-            try? fm.removeItem(at: videoDestinationURL)
-            try? fm.copyItem(at: liveWallpaperVideoBackupURL, to: videoDestinationURL)
-            try? fm.removeItem(at: liveWallpaperVideoBackupURL)
+            try? Self.restoreBackup(liveWallpaperVideoBackupURL, to: videoDestinationURL)
         }
 
         if fm.fileExists(atPath: liveWallpaperThumbnailBackupURL.path) {
-            try? fm.removeItem(at: thumbnailDestinationURL)
-            try? fm.copyItem(at: liveWallpaperThumbnailBackupURL, to: thumbnailDestinationURL)
-            try? fm.removeItem(at: liveWallpaperThumbnailBackupURL)
+            try? Self.restoreBackup(liveWallpaperThumbnailBackupURL, to: thumbnailDestinationURL)
         }
     }
 
@@ -1588,8 +1714,8 @@ final class FullScreenArtworkWindowManager: ObservableObject {
               var plist = try? PropertyListSerialization.propertyList(from: plistData, format: nil) as? [String: Any]
         else { return false }
 
-        let desktopBlock = makeImageWallpaperBlock(imageURL: imageURL)
-        let idleBlock = makeImageWallpaperBlock(imageURL: imageURL)
+        let desktopBlock = Self.makeImageWallpaperBlock(imageURL: imageURL)
+        let idleBlock = Self.makeImageWallpaperBlock(imageURL: imageURL)
 
         patchWallpaperEntries(&plist, desktopBlock: desktopBlock, idleBlock: idleBlock)
 
@@ -1615,8 +1741,8 @@ final class FullScreenArtworkWindowManager: ObservableObject {
             fallback: plist["SystemDefault"] as? [String: Any]
         )
 
-        let desktopBlock = makeAerialWallpaperBlock(assetID: assetID, existingBlock: desktopTemplate)
-        let idleBlock = makeAerialWallpaperBlock(assetID: assetID, existingBlock: idleTemplate)
+        let desktopBlock = Self.makeAerialWallpaperBlock(assetID: assetID, existingBlock: desktopTemplate)
+        let idleBlock = Self.makeAerialWallpaperBlock(assetID: assetID, existingBlock: idleTemplate)
 
         patchWallpaperEntries(&plist, desktopBlock: desktopBlock, idleBlock: idleBlock)
 
@@ -1633,7 +1759,7 @@ final class FullScreenArtworkWindowManager: ObservableObject {
         return fallback?[name] as? [String: Any]
     }
 
-    private func makeImageWallpaperBlock(imageURL: URL) -> [String: Any] {
+    nonisolated static func makeImageWallpaperBlock(imageURL: URL) -> [String: Any] {
         let config: [String: Any] = [
             "type": "imageFile",
             "url": ["relative": imageURL.absoluteString]
@@ -1658,7 +1784,7 @@ final class FullScreenArtworkWindowManager: ObservableObject {
         ]
     }
 
-    private func makeAerialWallpaperBlock(assetID: String, existingBlock: [String: Any]?) -> [String: Any] {
+    nonisolated static func makeAerialWallpaperBlock(assetID: String, existingBlock: [String: Any]?) -> [String: Any] {
         let config: [String: Any] = [
             "assetID": assetID
         ]
@@ -1753,18 +1879,16 @@ final class FullScreenArtworkWindowManager: ObservableObject {
     }
 
     private func restoreWallpaper() {
-        let fm = FileManager.default
         guard hasValidBackup else { return }
 
+        // The live-wallpaper files first and Index.plist last, as at launch: a stop
+        // half-way leaves the store Skerry's, and the next launch finishes the job.
+        restoreLiveWallpaperResources()
         do {
-            try fm.removeItem(at: wallpaperPlistURL)
-            try fm.copyItem(at: backupPlistURL, to: wallpaperPlistURL)
-            try fm.removeItem(at: backupPlistURL)
+            try Self.restoreBackup(backupPlistURL, to: wallpaperPlistURL)
         } catch {
             print("[FullScreenArtworkWindowManager] Failed to restore plist: \(error)")
         }
-
-        restoreLiveWallpaperResources()
         restartWallpaperAgent()
     }
 

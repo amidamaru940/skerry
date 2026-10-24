@@ -45,6 +45,25 @@ private enum SettingsTabGroup: String, CaseIterable, Identifiable {
     }
 }
 
+/// A section's page picker: segments when they fit, a pop-up menu otherwise.
+private struct SettingsPagePickerStyle: ViewModifier {
+    static let maxSegments = 4
+    let pageCount: Int
+
+    func body(content: Content) -> some View {
+        if pageCount <= Self.maxSegments {
+            content.pickerStyle(.segmented)
+        } else {
+            content.pickerStyle(.menu).fixedSize()
+        }
+    }
+}
+
+/// Every Settings page by raw name, for `GalleryMode`.
+enum SettingsGalleryPages {
+    static var all: [String] { SettingsTab.allCases.map(\.rawValue) }
+}
+
 private enum SettingsTab: String, CaseIterable, Identifiable {
     case general
     case layout
@@ -727,14 +746,17 @@ struct SettingsView: View {
             VStack(spacing: 0) {
                 let pages = pages(of: currentSection)
                 if pages.count > 1 {
-                    // The pages of a section, one at a time.
+                    // The pages of a section, one at a time. Up to four fit a
+                    // segmented control; with more (Productivity has six) it
+                    // grew wider than the window and pushed the whole page
+                    // sideways, clipping the sidebar and the values (21.10).
                     Picker("", selection: selectionBinding) {
                         ForEach(pages) { page in
                             Text(LocalizedStringKey(page.title)).tag(page)
                         }
                     }
-                    .pickerStyle(.segmented)
                     .labelsHidden()
+                    .modifier(SettingsPagePickerStyle(pageCount: pages.count))
                     .padding(.horizontal, 20)
                     .padding(.top, 8)
                     .padding(.bottom, 2)
@@ -758,6 +780,19 @@ struct SettingsView: View {
             guard let firstMatch = matches.first else { return }
             if !matches.contains(resolvedSelection) {
                 selectedTab = firstMatch
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: GalleryMode.selectSettingsPage)) { note in
+            _ = SettingsWindowController.takeRequestedPage()
+            if let raw = note.object as? String, let page = SettingsTab(rawValue: raw) {
+                selectedTab = page
+            }
+        }
+        // `showWindow(page:)` on the window's first showing: the page was
+        // asked for before this view could hear about it.
+        .onAppear {
+            if let raw = SettingsWindowController.takeRequestedPage(), let page = SettingsTab(rawValue: raw) {
+                selectedTab = page
             }
         }
         .background {
@@ -1108,8 +1143,10 @@ struct SettingsView: View {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return [] }
 
+        let inlineHUD = Defaults[.inlineHUD]
         return settingsSearchIndex
             .filter { availableTabs.contains($0.tab) }
+            .filter { SettingsRowVisibility.isSearchable($0.title, inlineHUD: inlineHUD) }
             .filter { entry in
                 // English or the app's language (Russian), title or keywords.
                 SettingsSectionLayout.matches(entry.title, query: trimmed) ||
@@ -1899,7 +1936,7 @@ struct Downloads: View {
                     }
                 }
 
-                Text(style.rawValue)
+                Text(style.localizedName)
                     .font(.caption)
                     .fontWeight(.medium)
                     .lineLimit(2)
@@ -2348,7 +2385,7 @@ private struct HUDAndOSDSettingsView: View {
                         Toggle("Interactive (Drag to Change)", isOn: $verticalHUDInteractive)
                         Picker("Material", selection: $verticalHUDMaterial) {
                             ForEach(availableVerticalMaterials, id: \.self) { material in
-                                Text(material.rawValue).tag(material)
+                                Text(LocalizedStringKey(material.rawValue)).tag(material)
                             }
                         }
 
@@ -2854,6 +2891,11 @@ private struct DevicesSettingsView: View {
                 Defaults.Toggle(key: .showBluetoothBatteryPercentageText) {
                     Text("Show battery percentage text in HUD")
                 }
+                // The battery needs Bluetooth, which is asked for only from a
+                // click like this one, never at launch (§5.8).
+                .onChange { isOn in
+                    if isOn { BluetoothAudioManager.shared.requestBatteryAccess() }
+                }
                 .settingsHighlight(id: highlightID("Show battery percentage text in HUD"))
                 Defaults.Toggle(key: .showBluetoothDeviceNameMarquee) {
                     Text("Scroll device name in HUD")
@@ -2947,6 +2989,18 @@ struct HUD: View {
         progressBarStyle == .segmented
     }
 
+    /// The bar rows draw only in the Default HUD style (SettingsRowVisibility).
+    private var showsProgressBarRows: Bool {
+        SettingsRowVisibility.showsProgressBarRows(inlineHUD: inlineHUD)
+    }
+
+    /// Smooth transitions colour the Bluetooth battery bar in either style,
+    /// the volume bar only where it is drawn as a bar.
+    private var showsSmoothColorRow: Bool {
+        !colorCodingDisabled && (Defaults[.useColorCodedBatteryDisplay]
+            || (showsProgressBarRows && Defaults[.useColorCodedVolumeDisplay]))
+    }
+
     var body: some View {
         Group {
             if !hasAccessibilityPermission && !enableThirdPartyDDCIntegration {
@@ -2992,39 +3046,47 @@ struct HUD: View {
                     .font(.caption)
             }
 
-            Section {
-                Defaults.Toggle(key: .useColorCodedVolumeDisplay) {
-                    Text("Color-coded volume display")
-                }
-                .disabled(colorCodingDisabled)
-                .settingsHighlight(id: highlightID("Color-coded volume display"))
-
-                if !colorCodingDisabled && (Defaults[.useColorCodedBatteryDisplay] || Defaults[.useColorCodedVolumeDisplay]) {
-                    Defaults.Toggle(key: .useSmoothColorGradient) {
-                        Text("Smooth color transitions")
+            // Inline style (concept E): the level line ignores the bar rows, so the
+            // section stays only for the Bluetooth battery bar's smooth colours.
+            if showsProgressBarRows || showsSmoothColorRow {
+                Section {
+                    if showsProgressBarRows {
+                        Defaults.Toggle(key: .useColorCodedVolumeDisplay) {
+                            Text("Color-coded volume display")
+                        }
+                        .disabled(colorCodingDisabled)
+                        .settingsHighlight(id: highlightID("Color-coded volume display"))
                     }
-                    .settingsHighlight(id: highlightID("Smooth color transitions"))
-                }
 
-                Defaults.Toggle(key: .showProgressPercentages) {
-                    Text("Show percentages beside progress bars")
-                }
-                .settingsHighlight(id: highlightID("Show percentages beside progress bars"))
-            } header: {
-                Text("Dynamic Island Progress Bars")
-            } footer: {
-                if colorCodingDisabled {
-                    Text("Color-coded fills and smooth gradients are unavailable in Segmented mode. Switch to Hierarchical or Gradient to adjust these options.")
-                        .foregroundStyle(.secondary)
-                        .font(.caption)
-                } else if Defaults[.useSmoothColorGradient] {
-                    Text("Smooth transitions blend Green (0–60%), Yellow (60–85%), and Red (85–100%) through the entire fill.")
-                        .foregroundStyle(.secondary)
-                        .font(.caption)
-                } else {
-                    Text("Discrete transitions snap between Green (0–60%), Yellow (60–85%), and Red (85–100%).")
-                        .foregroundStyle(.secondary)
-                        .font(.caption)
+                    if showsSmoothColorRow {
+                        Defaults.Toggle(key: .useSmoothColorGradient) {
+                            Text("Smooth color transitions")
+                        }
+                        .settingsHighlight(id: highlightID("Smooth color transitions"))
+                    }
+
+                    if showsProgressBarRows {
+                        Defaults.Toggle(key: .showProgressPercentages) {
+                            Text("Show percentages beside progress bars")
+                        }
+                        .settingsHighlight(id: highlightID("Show percentages beside progress bars"))
+                    }
+                } header: {
+                    Text("Dynamic Island Progress Bars")
+                } footer: {
+                    if colorCodingDisabled {
+                        Text("Color-coded fills and smooth gradients are unavailable in Segmented mode. Switch to Hierarchical or Gradient to adjust these options.")
+                            .foregroundStyle(.secondary)
+                            .font(.caption)
+                    } else if Defaults[.useSmoothColorGradient] {
+                        Text("Smooth transitions blend Green (0–60%), Yellow (60–85%), and Red (85–100%) through the entire fill.")
+                            .foregroundStyle(.secondary)
+                            .font(.caption)
+                    } else {
+                        Text("Discrete transitions snap between Green (0–60%), Yellow (60–85%), and Red (85–100%).")
+                            .foregroundStyle(.secondary)
+                            .font(.caption)
+                    }
                 }
             }
 
@@ -3044,15 +3106,17 @@ struct HUD: View {
                         }
                     }
                 }
-                Picker("Progressbar style", selection: $progressBarStyle) {
-                    Text("Hierarchical")
-                        .tag(ProgressBarStyle.hierarchical)
-                    Text("Gradient")
-                        .tag(ProgressBarStyle.gradient)
-                    Text("Segmented")
-                        .tag(ProgressBarStyle.segmented)
+                if showsProgressBarRows {
+                    Picker("Progressbar style", selection: $progressBarStyle) {
+                        Text("Hierarchical")
+                            .tag(ProgressBarStyle.hierarchical)
+                        Text("Gradient")
+                            .tag(ProgressBarStyle.gradient)
+                        Text("Segmented")
+                            .tag(ProgressBarStyle.segmented)
+                    }
+                    .settingsHighlight(id: highlightID("Progressbar style"))
                 }
-                .settingsHighlight(id: highlightID("Progressbar style"))
                 Defaults.Toggle(key: .systemEventIndicatorShadow) {
                     Text("Enable glowing effect")
                 }
@@ -4736,10 +4800,14 @@ struct Appearance: View {
                     // Upstream's typo-twin of the switch above; this one tints the player.
                     Text("Tint the player with the artwork colours")
                 }
-                Defaults.Toggle(key: .lightingEffect) {
-                    Text("Enable blur effect behind album art")
+                // Hidden under concept E (SettingsRowVisibility). The three rows
+                // around it stay: the lock screen's music widget still reads them.
+                if SettingsRowVisibility.showsArtworkLighting {
+                    Defaults.Toggle(key: .lightingEffect) {
+                        Text("Enable blur effect behind album art")
+                    }
+                    .settingsHighlight(id: highlightID("Enable blur effect behind album art"))
                 }
-                .settingsHighlight(id: highlightID("Enable blur effect behind album art"))
                 Picker("Slider color", selection: $sliderColor) {
                     ForEach(SliderColorEnum.allCases, id: \.self) { option in
                         Text(option.localizedName)
@@ -4851,10 +4919,13 @@ struct Appearance: View {
                             }
 
                             Button {
+                                // An empty or malformed address used to crash Settings here.
+                                guard let lottieURL = URL(string: url.trimmingCharacters(in: .whitespacesAndNewlines)),
+                                      lottieURL.scheme != nil else { return }
                                 let visualizer: CustomVisualizer = .init(
                                     UUID: UUID(),
                                     name: name,
-                                    url: URL(string: url)!,
+                                    url: lottieURL,
                                     speed: speed
                                 )
 
@@ -4868,6 +4939,7 @@ struct Appearance: View {
                                     .frame(maxWidth: .infinity, alignment: .center)
                             }
                             .buttonStyle(BorderedProminentButtonStyle())
+                            .disabled(URL(string: url.trimmingCharacters(in: .whitespacesAndNewlines))?.scheme == nil)
                         }
                     }
                     .textFieldStyle(RoundedBorderTextFieldStyle())
@@ -5206,7 +5278,7 @@ struct Appearance: View {
                 .settingsHighlight(id: highlightID("Expanded notch width"))
 
                 HStack {
-                    Text("\(tabCount) tab\(tabCount == 1 ? "" : "s") enabled · min \(Int(recommendedMin)) px")
+                    Text("\(tabCount) tabs enabled") + Text(" · min \(Int(recommendedMin)) px")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Spacer()
@@ -5984,6 +6056,10 @@ struct LockScreenSettings: View {
                             Defaults.Toggle(key: .lockScreenBatteryShowsBluetooth) {
                                 Text("Show Bluetooth battery")
                             }
+                            // Asks for Bluetooth from this click (§5.8).
+                            .onChange { isOn in
+                                if isOn { BluetoothAudioManager.shared.requestBatteryAccess() }
+                            }
                             .settingsHighlight(id: highlightID("Show Bluetooth battery"))
                         }
                     } header: {
@@ -6237,7 +6313,7 @@ private struct LockScreenIconStyleCard: View {
                 }
                 .frame(width: 72, height: 50)
 
-                Text(title)
+                Text(LocalizedStringKey(title))
                     .font(.caption)
                     .fontWeight(.medium)
             }
@@ -8362,7 +8438,11 @@ struct ScreenAssistantSettings: View {
     @ObservedObject var screenAssistantManager = ScreenAssistantManager.shared
     @Default(.enableScreenAssistant) var enableScreenAssistant
     @Default(.screenAssistantDisplayMode) var screenAssistantDisplayMode
-    @Default(.geminiApiKey) var geminiApiKey
+    /// The Gemini key is in the Keychain; it is never read back into a field.
+    /// nil until the Keychain has been asked.
+    @State private var geminiKeyState: ScreenAssistantKeyState?
+    /// The Keychain refused the typed key: the field stays open with it.
+    @State private var geminiKeySaveFailed = false
     @State private var apiKeyText = ""
     @State private var showingApiKey = false
 
@@ -8388,36 +8468,50 @@ struct ScreenAssistantSettings: View {
                     HStack {
                         Text("Gemini API Key")
                         Spacer()
-                        if geminiApiKey.isEmpty {
-                            Text("Not Set")
-                                .foregroundColor(.red)
-                        } else {
-                            Text("••••••••")
-                                .foregroundColor(.green)
-                        }
+                        if geminiKeyState == .saved {
+                            Text("Saved in Keychain")
+                                .foregroundColor(.secondary)
 
-                        Button(showingApiKey ? "Hide" : (geminiApiKey.isEmpty ? "Set" : "Change")) {
-                            if showingApiKey {
-                                showingApiKey = false
-                                if !apiKeyText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                                    Defaults[.geminiApiKey] = apiKeyText
+                            Button("Delete Key", role: .destructive) {
+                                if ScreenAssistantKeys.delete(.gemini) {
+                                    geminiKeyState = .notSet
                                 }
-                                apiKeyText = ""
+                            }
+                        } else if geminiKeyState != nil {
+                            if geminiKeyState == .unavailable {
+                                Text("No access to the Keychain")
+                                    .foregroundColor(.red)
                             } else {
-                                showingApiKey = true
-                                apiKeyText = geminiApiKey
+                                Text("Not Set")
+                                    .foregroundColor(.red)
+                            }
+
+                            Button(showingApiKey ? "Hide" : "Set") {
+                                if showingApiKey {
+                                    saveGeminiKey()
+                                } else {
+                                    showingApiKey = true
+                                    apiKeyText = ""
+                                    geminiKeySaveFailed = false
+                                }
                             }
                         }
                     }
 
-                    if showingApiKey {
+                    if showingApiKey && geminiKeyState != .saved {
                         VStack(alignment: .leading, spacing: 8) {
                             SecureField("Enter your Gemini API Key", text: $apiKeyText)
                                 .textFieldStyle(.roundedBorder)
 
-                            Text("Get your free API key from Google AI Studio")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
+                            if geminiKeySaveFailed {
+                                Text("Couldn't save to the Keychain")
+                                    .font(.caption)
+                                    .foregroundColor(.red)
+                            } else {
+                                Text("Get your free API key from Google AI Studio")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
 
                             HStack {
                                 Button("Open Google AI Studio") {
@@ -8428,9 +8522,7 @@ struct ScreenAssistantSettings: View {
                                 Spacer()
 
                                 Button("Save") {
-                                    Defaults[.geminiApiKey] = apiKeyText
-                                    showingApiKey = false
-                                    apiKeyText = ""
+                                    saveGeminiKey()
                                 }
                                 .disabled(apiKeyText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                             }
@@ -8457,12 +8549,6 @@ struct ScreenAssistantSettings: View {
                             .foregroundColor(.secondary)
                     }
 
-                    HStack {
-                        Text("Recording Status")
-                        Spacer()
-                        Text(screenAssistantManager.isRecording ? "Recording" : "Ready")
-                            .foregroundColor(screenAssistantManager.isRecording ? .red : .secondary)
-                    }
                 } header: {
                     Text("Configuration")
                 } footer: {
@@ -8483,7 +8569,7 @@ struct ScreenAssistantSettings: View {
                 } header: {
                     Text("Actions")
                 } footer: {
-                    Text("Clear all files removes all attached files and audio recordings. This action is permanent.")
+                    Text("Clear all files removes all attached files. This action is permanent.")
                 }
 
                 if !screenAssistantManager.attachedFiles.isEmpty {
@@ -8516,6 +8602,27 @@ struct ScreenAssistantSettings: View {
         }
         .formStyle(.grouped)
         .navigationTitle("Screen Assistant")
+        .onAppear {
+            ScreenAssistantKeys.states(of: [.gemini]) { geminiKeyState = $0[.gemini] }
+        }
+    }
+
+    /// Saves what was typed. When the Keychain refuses it, the field stays
+    /// open with the text and one line says so.
+    private func saveGeminiKey() {
+        guard !apiKeyText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            showingApiKey = false
+            geminiKeySaveFailed = false
+            return
+        }
+        if ScreenAssistantKeys.save(apiKeyText, for: .gemini) {
+            geminiKeyState = .saved
+            geminiKeySaveFailed = false
+            showingApiKey = false
+            apiKeyText = ""
+        } else {
+            geminiKeySaveFailed = true
+        }
     }
 
     private func timeAgoString(from date: Date) -> String {
@@ -8743,7 +8850,7 @@ struct CustomOSDSettings: View {
                 Section {
                     Picker("Material", selection: $osdMaterial) {
                         ForEach(availableOSDMaterials, id: \.self) { material in
-                            Text(material.rawValue).tag(material)
+                            Text(LocalizedStringKey(material.rawValue)).tag(material)
                         }
                     }
                     .settingsHighlight(id: highlightID("Material"))
@@ -8780,7 +8887,7 @@ struct CustomOSDSettings: View {
 
                     Picker("Icon & Progress Color", selection: $osdIconColorStyle) {
                         ForEach(OSDIconColorStyle.allCases, id: \.self) { style in
-                            Text(style.rawValue).tag(style)
+                            Text(LocalizedStringKey(style.rawValue)).tag(style)
                         }
                     }
                     .settingsHighlight(id: highlightID("Icon & Progress Color"))
@@ -9051,7 +9158,7 @@ struct TerminalSettings: View {
     }
 
     private var formattedMaxHeight: String {
-        "\(Int(terminalMaxHeightFraction * 100))% of screen"
+        String(localized: "\(Int(terminalMaxHeightFraction * 100))% of screen")
     }
 
     /// All monospaced font families available on the system.

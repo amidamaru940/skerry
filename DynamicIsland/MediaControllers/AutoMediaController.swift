@@ -123,14 +123,14 @@ final class AutoMediaController: ObservableObject, MediaControllerProtocol {
 
     var isWorking: Bool { system?.isWorking ?? true }
 
-    func play() async { await target?.play() }
-    func pause() async { await target?.pause() }
-    func seek(to time: Double) async { await target?.seek(to: time) }
-    func nextTrack() async { await target?.nextTrack() }
-    func previousTrack() async { await target?.previousTrack() }
-    func togglePlay() async { await target?.togglePlay() }
-    func toggleShuffle() async { await target?.toggleShuffle() }
-    func toggleRepeat() async { await target?.toggleRepeat() }
+    func play() async { await target?.play(); askAboutPlayerAfterClick() }
+    func pause() async { await target?.pause(); askAboutPlayerAfterClick() }
+    func seek(to time: Double) async { await target?.seek(to: time); askAboutPlayerAfterClick() }
+    func nextTrack() async { await target?.nextTrack(); askAboutPlayerAfterClick() }
+    func previousTrack() async { await target?.previousTrack(); askAboutPlayerAfterClick() }
+    func togglePlay() async { await target?.togglePlay(); askAboutPlayerAfterClick() }
+    func toggleShuffle() async { await target?.toggleShuffle(); askAboutPlayerAfterClick() }
+    func toggleRepeat() async { await target?.toggleRepeat(); askAboutPlayerAfterClick() }
     func isActive() -> Bool { target?.isActive() ?? false }
 
     func updatePlaybackInfo() async {
@@ -145,6 +145,63 @@ final class AutoMediaController: ObservableObject, MediaControllerProtocol {
     func isCurrentTrackFavorited() async -> Bool? { await target?.isCurrentTrackFavorited() }
     @discardableResult
     func setCurrentTrackFavorited(_ favorited: Bool) async -> Bool {
-        await target?.setCurrentTrackFavorited(favorited) ?? false
+        let done = await target?.setCurrentTrackFavorited(favorited) ?? false
+        askAboutPlayerAfterClick()
+        return done
+    }
+
+    // MARK: Automation (§5.8)
+
+    /// Auto sends Music and Spotify no Apple Event until macOS allows it or a
+    /// player control is clicked; until then it shows them through the system
+    /// Now Playing, whose controls send them nothing either. So after such a
+    /// click the player it was about reads itself once, through the check that
+    /// may ask. After a yes its own reports take over and Auto ranks it, the
+    /// canvas and the heart included, as on a Mac that allowed it long ago
+    /// (there `refreshAfterClick` returns at once). Media keys and the
+    /// play/pause shortcut count as clicks, as they do everywhere.
+    private func askAboutPlayerAfterClick() {
+        let source = Self.playerToAskAbout(
+            choice: choice,
+            systemApp: systemState?.bundleIdentifier,
+            hasSystem: system != nil,
+            order: Defaults[.autoMediaSourceOrder],
+            ignored: Set(Defaults[.autoMediaIgnoredApps]),
+            isRunning: { [spotify, appleMusic] source in
+                source == .spotify ? spotify.isActive() : appleMusic.isActive()
+            }
+        )
+        switch source {
+        case .spotify: Task { [spotify] in await spotify.refreshAfterClick() }
+        case .appleMusic: Task { [appleMusic] in await appleMusic.refreshAfterClick() }
+        case .otherApps, nil: break
+        }
+    }
+
+    /// The player a click is about while Auto shows no dedicated one: Spotify
+    /// or Music while macOS reports it, or, where the system Now Playing does
+    /// not work (MediaChecker) and nothing is shown, the first of them in the
+    /// user's order that runs and is not ignored. A dedicated choice is
+    /// already allowed, and anything else is not Spotify or Music: nil.
+    static func playerToAskAbout(
+        choice: AutoSourceChoice,
+        systemApp: String?,
+        hasSystem: Bool,
+        order: [AutoMediaSource],
+        ignored: Set<String>,
+        isRunning: (AutoMediaSource) -> Bool
+    ) -> AutoMediaSource? {
+        switch choice {
+        case .system:
+            let source = systemApp.map(AutoMediaSource.source(for:)) ?? .otherApps
+            return source == .otherApps ? nil : source
+        case .none where !hasSystem:
+            return AutoSourceResolver.normalizedOrder(order).first { source in
+                guard let bundleID = source.bundleIdentifier, !ignored.contains(bundleID) else { return false }
+                return isRunning(source)
+            }
+        case .none, .dedicated:
+            return nil
+        }
     }
 }

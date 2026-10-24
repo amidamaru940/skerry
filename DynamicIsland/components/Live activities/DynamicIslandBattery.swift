@@ -34,7 +34,8 @@ private extension BatteryTemporaryHUDKind {
     func metrics(
         style: BatteryNotificationStyle,
         closedNotchWidth: CGFloat,
-        baseHeight: CGFloat
+        baseHeight: CGFloat,
+        compactWing: CGFloat
     ) -> BatteryTemporaryHUDMetrics {
         let compactBaseRadius = max(baseHeight / 2, 16)
         let compactTopRadius = max(12, compactBaseRadius - 4)
@@ -42,7 +43,7 @@ private extension BatteryTemporaryHUDKind {
         switch (self, style) {
         case (.charging, _), (.lowBattery, .compact), (.fullBattery, .compact):
             return BatteryTemporaryHUDMetrics(
-                width: closedNotchWidth + 180,
+                width: closedNotchWidth + 2 * compactWing,
                 height: baseHeight,
                 topRadius: compactTopRadius,
                 bottomRadius: compactBaseRadius
@@ -65,18 +66,30 @@ private extension BatteryTemporaryHUDKind {
     }
 }
 
+/// The compact battery event in equal wings (E §2.1): the title flush left
+/// in the leading wing, the level flush right in the trailing one, the black
+/// middle on the camera. One row across the island let a long title
+/// («Полный заряд») run in under the camera.
 private struct BatteryCompactStatusRow: View {
     let title: String
     let batteryLevel: Int
     let tint: Color
+    let closedNotchWidth: CGFloat
 
     var body: some View {
-        HStack {
-            Text(verbatim: title)
-                .font(.system(size: 14))
-                .foregroundColor(.white.opacity(0.8))
+        let geometry = BatteryTemporaryActivityView.compactGeometry(title: title, closedNotchWidth: closedNotchWidth)
+        HStack(spacing: 0) {
+            ClosedWingText(
+                text: title,
+                width: ClosedWingE.measure(title, font: BatteryTemporaryActivityView.compactTitleFont),
+                font: .system(size: 14),
+                color: .white.opacity(0.8)
+            )
+            .padding(.leading, BatteryTemporaryActivityView.compactWallInset)
+            .frame(width: geometry.leadingWing, alignment: .leading)
 
-            Spacer()
+            Color.clear
+                .frame(width: geometry.middle)
 
             HStack(spacing: 6) {
                 Text("\(batteryLevel)%")
@@ -104,8 +117,9 @@ private struct BatteryCompactStatusRow: View {
                         .frame(width: 2, height: 6)
                 }
             }
+            .padding(.trailing, BatteryTemporaryActivityView.compactWallInset)
+            .frame(width: geometry.trailingWing, alignment: .trailing)
         }
-        .padding(.horizontal, 16)
     }
 }
 
@@ -146,7 +160,8 @@ struct BatteryTemporaryActivityView: View {
         kind.metrics(
             style: style,
             closedNotchWidth: closedNotchWidth,
-            baseHeight: baseHeight
+            baseHeight: baseHeight,
+            compactWing: Self.compactWing(for: kind, batteryLevel: batteryLevel)
         )
     }
 
@@ -190,7 +205,8 @@ struct BatteryTemporaryActivityView: View {
             BatteryCompactStatusRow(
                 title: compactTitle,
                 batteryLevel: batteryLevel,
-                tint: batteryTint
+                tint: batteryTint,
+                closedNotchWidth: closedNotchWidth
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
         } else {
@@ -216,6 +232,33 @@ struct BatteryTemporaryActivityView: View {
 
     private var compactTitle: String {
         Self.compactTitle(for: kind, batteryLevel: batteryLevel)
+    }
+
+    /// The compact row's title, 14 pt.
+    static let compactTitleFont = NSFont.systemFont(ofSize: 14)
+    /// The compact row's content sits this far from each wall.
+    static let compactWallInset: CGFloat = 16
+    /// The level, its value and the battery glyph, at their widest («100 %»).
+    static let compactLevelWidth: CGFloat =
+        ClosedWingE.measure(String(localized: "\(100)%"), font: NSFont.systemFont(ofSize: 14)) + 6 + 28 + 1.5 + 2
+
+    /// The compact row's geometry: equal wings, each at least the old 90 so
+    /// a short title looks as before, and as wide as the title (up to the
+    /// closed cap) where it is longer.
+    static func compactGeometry(title: String, closedNotchWidth: CGFloat) -> ClosedWingGeometry {
+        let titleWidth = min(ClosedWingE.measure(title, font: compactTitleFont), ClosedWingE.textCap)
+        let leading = compactWallInset + titleWidth
+        let trailing = compactWallInset + compactLevelWidth
+        var geometry = ClosedWingGeometry.equalWings(closedNotchWidth: closedNotchWidth, leading: leading, trailing: trailing)
+        let wing = max(geometry.wing, 90)
+        geometry.leadingWing = wing
+        geometry.trailingWing = wing
+        return geometry
+    }
+
+    /// One wing of the compact row for this event.
+    static func compactWing(for kind: BatteryTemporaryHUDKind, batteryLevel: Int) -> CGFloat {
+        compactGeometry(title: compactTitle(for: kind, batteryLevel: batteryLevel), closedNotchWidth: 0).wing
     }
 
     static func compactTitle(for kind: BatteryTemporaryHUDKind, batteryLevel: Int) -> String {

@@ -16,6 +16,7 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
+import AppKit
 import SwiftUI
 
 /// Closed-island indicator while Keep Awake is on, so it is visible without
@@ -32,6 +33,22 @@ struct KeepAwakeLiveActivity: View {
     /// Wide enough for the label in 12 pt monospaced digits.
     static func wingWidth(for label: String) -> CGFloat {
         max(26, CGFloat(label.count) * 7.5 + 4)
+    }
+
+    /// 12 pt semibold, tabular digits: the time left.
+    static let labelFont = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .semibold)
+
+    /// The cup flush left, the time flush right, in equal wings.
+    static func closedGeometry(closedNotchWidth: CGFloat, label: String) -> ClosedWingGeometry {
+        let wing = wingWidth(for: label)
+        return ClosedWingGeometry(
+            leadingWing: wing,
+            middle: closedNotchWidth,
+            trailingWing: wing,
+            leadingContent: 0,
+            trailingContent: ClosedWingE.measure(label, font: labelFont),
+            camera: ClosedWingE.cameraWidth(closedNotchWidth: closedNotchWidth)
+        )
     }
 
     var body: some View {

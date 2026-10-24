@@ -62,6 +62,12 @@ struct MarqueeText: View {
     @State private var textSize: CGSize = .zero
     @State private var offset: CGFloat = 0
     @State private var isAnimating: Bool = false
+    /// Bumped by every restart: a loop from before it stops at its next step.
+    /// Checking `isAnimating` alone let the old loop carry on once the new
+    /// one had set it again, so restarts stacked loops on top of each other.
+    @State private var loopGeneration = 0
+    /// Asleep or screen off: no loop (the island is not on screen).
+    @ObservedObject private var gate = ActivityGate.shared
     
     init(_ text: Binding<String>, font: Font = .body, nsFont: NSFont.TextStyle = .body, textColor: Color = .primary, backgroundColor: Color = .clear, minDuration: Double = 3.0, frameWidth: CGFloat = 200) {
         _text = text
@@ -104,6 +110,10 @@ struct MarqueeText: View {
             }
             .onDisappear {
                 isAnimating = false
+                loopGeneration &+= 1
+            }
+            .onChange(of: gate.state.screenInUse) { _, _ in
+                resetAndStart()
             }
         }
         .frame(width: frameWidth, alignment: .leading)
@@ -113,27 +123,30 @@ struct MarqueeText: View {
     
     private func resetAndStart() {
         isAnimating = false
+        loopGeneration &+= 1
+        let generation = loopGeneration
         withAnimation(.none) {
             offset = 0
         }
         
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-            if needsScrolling {
+            guard generation == loopGeneration else { return }
+            if needsScrolling && gate.state.screenInUse {
                 isAnimating = true
-                startAnimationLoop()
+                startAnimationLoop(generation: generation)
             }
         }
     }
     
-    private func startAnimationLoop() {
-        guard isAnimating && needsScrolling else { return }
+    private func startAnimationLoop(generation: Int) {
+        guard isAnimating && needsScrolling && generation == loopGeneration else { return }
         
         // Duration based on speed (approx 30 pts per second)
         let duration = Double(textSize.width / 30)
         
         // 1. Initial/Restart Pause
         DispatchQueue.main.asyncAfter(deadline: .now() + minDuration) {
-            guard isAnimating else { return }
+            guard isAnimating, generation == loopGeneration, gate.state.screenInUse else { return }
             
             // 2. Linear Move
             withAnimation(.linear(duration: duration)) {
@@ -142,7 +155,7 @@ struct MarqueeText: View {
             
             // 3. Wait for move to finish
             DispatchQueue.main.asyncAfter(deadline: .now() + duration) {
-                guard isAnimating else { return }
+                guard isAnimating, generation == loopGeneration else { return }
                 
                 // 4. Snap back instantly
                 withAnimation(.none) {
@@ -150,7 +163,7 @@ struct MarqueeText: View {
                 }
                 
                 // 5. Repeat
-                startAnimationLoop()
+                startAnimationLoop(generation: generation)
             }
         }
     }

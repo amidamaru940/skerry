@@ -21,24 +21,21 @@
  */
 
 import SwiftUI
-import Lottie
-import LottieUI
 import Defaults
 
 struct LottieAnimationView: View {
-    let state1 = LUStateData(type: .loadedFrom(URL(string: "https://assets9.lottiefiles.com/packages/lf20_mniampqn.json")!), speed: 1.0, loopMode: .loop)
+    /// Plays while the music does; holds its frame on pause.
+    var isPlaying: Bool = true
     @Default(.selectedVisualizer) var selectedVisualizer
+
+    private static let defaultSource = AnimationSource.lottieURL(URL(string: "https://assets9.lottiefiles.com/packages/lf20_mniampqn.json")!)
+
     var body: some View {
-        if selectedVisualizer == nil {
-            LottieView(state: state1)
+        if let visualizer = selectedVisualizer {
+            PausableLottieView(source: .lottieURL(visualizer.url), speed: visualizer.speed, isPlaying: isPlaying)
+                .id(visualizer.url)
         } else {
-            LottieView(
-                state: LUStateData(
-                    type: .loadedFrom(selectedVisualizer!.url),
-                    speed: selectedVisualizer!.speed,
-                    loopMode: .loop
-                )
-            )
+            PausableLottieView(source: Self.defaultSource, isPlaying: isPlaying)
         }
     }
 }

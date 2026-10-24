@@ -60,6 +60,72 @@ final class MusicOnlyHoldTests: XCTestCase {
         XCTAssertNil(shown.controlsTakenBy)
     }
 
+    /// An episode on a series site reports no artist either, but runs far
+    /// longer than a Reel: it is shown and the island controls it (23.10).
+    func testALongVideoWithoutArtistIsShownWithItsControls() {
+        let episode = PlaybackState(bundleIdentifier: browser, isPlaying: true, title: "Смотреть Сериал 33 серия", artist: "", album: "", duration: 1377.4, artwork: Data([2]))
+        var hold = MusicOnlyHold()
+        _ = hold.admit(music(), now: start)
+
+        let shown = hold.admit(episode, now: start.addingTimeInterval(60))
+
+        XCTAssertEqual(shown, episode)
+        XCTAssertNil(shown.controlsTakenBy)
+
+        var fresh = MusicOnlyHold()
+        XCTAssertEqual(fresh.admit(episode, now: start), episode, "with no music before it too")
+        XCTAssertFalse(MusicOnlyHold.isUntitledVideo(episode))
+        XCTAssertTrue(MusicOnlyHold.isUntitledVideo(reel()), "a Reel is still held")
+    }
+
+    /// A Reel opened over a paused episode arrives title first, over the
+    /// episode's blank artist, length and cover: that mix is not shown, and
+    /// the Reel then holds the episode like music.
+    func testAReelOverAnEpisodeArrivingTitleFirstIsNotShown() {
+        let episode = PlaybackState(bundleIdentifier: browser, isPlaying: false, title: "Сериал 33 серия", artist: "", album: "", duration: 1377.4, artwork: Data([2]))
+        var hold = MusicOnlyHold()
+        XCTAssertEqual(hold.admit(episode, now: start), episode)
+
+        let titleFirst = PlaybackState(bundleIdentifier: browser, isPlaying: true, title: "Instagram • Messages", artist: "", album: "", duration: 1377.4, artwork: Data([2]))
+        XCTAssertEqual(hold.admit(titleFirst, now: start.addingTimeInterval(10)).title, "Сериал 33 серия")
+
+        let shown = hold.admit(reel(), now: start.addingTimeInterval(10.4))
+        XCTAssertEqual(shown.title, "Сериал 33 серия")
+        XCTAssertEqual(shown.controlsTakenBy, browser)
+    }
+
+    /// Recorded 23.10: Chrome moving from a paused YouTube video to
+    /// a series tab sent the episode's title over the video's channel,
+    /// length and cover, then the episode alone, then its cover.
+    func testSwitchingFromYouTubeToASeriesTabShowsTheEpisode() {
+        let youtube = PlaybackState(bundleIdentifier: browser, isPlaying: false, title: "\"Разговор\" — интервью", artist: "Anchor", album: "", duration: 446.96, artwork: Data([1]))
+        var hold = MusicOnlyHold()
+        XCTAssertEqual(hold.admit(youtube, now: start), youtube)
+
+        var mix = youtube
+        mix.title = "Смотреть Сериал 33 серия"
+        mix.artwork = nil
+        XCTAssertEqual(hold.admit(mix, now: start.addingTimeInterval(10)).title, youtube.title)
+        mix.artwork = Data([1])
+        mix.isPlaying = true
+        XCTAssertEqual(hold.admit(mix, now: start.addingTimeInterval(10.1)).title, youtube.title)
+
+        var episode = PlaybackState(bundleIdentifier: browser, isPlaying: true, title: mix.title, artist: "", album: "", duration: 1377.4)
+        _ = hold.admit(episode, now: start.addingTimeInterval(10.2))
+        episode.artwork = Data([2])
+        let shown = hold.admit(episode, now: start.addingTimeInterval(10.3))
+
+        XCTAssertEqual(shown, episode)
+        XCTAssertNil(shown.controlsTakenBy)
+    }
+
+    func testFiveMinutesIsWhereAVideoStopsBeingAClip() {
+        let clip = PlaybackState(bundleIdentifier: browser, isPlaying: true, title: "Clip", artist: "", album: "", duration: 299.9)
+        let video = PlaybackState(bundleIdentifier: browser, isPlaying: true, title: "Video", artist: "", album: "", duration: 300)
+        XCTAssertTrue(MusicOnlyHold.isUntitledVideo(clip))
+        XCTAssertFalse(MusicOnlyHold.isUntitledVideo(video))
+    }
+
     func testAReelWithNoMusicBeforeItIsNotShown() {
         var hold = MusicOnlyHold()
 

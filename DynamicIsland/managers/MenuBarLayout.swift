@@ -26,43 +26,87 @@ import Combine
 final class MenuBarLayout: ObservableObject {
     static let shared = MenuBarLayout()
 
-    /// Right edge of the last menu of the frontmost app, in screen coordinates.
-    /// `nil` when it cannot be known -- no accessibility permission, an app that
-    /// exposes no menu bar, or a process that did not answer in time. Callers
-    /// treat that as "no constraint" rather than guessing.
-    @Published private(set) var appMenusRightEdge: CGFloat?
+    /// What the strip actually holds. `menuItemFrames` are the frontmost
+    /// app's menu titles (accessibility's view, global coordinates; only x
+    /// matters). `statusItemFrames` are the other apps' menu bar status
+    /// items, from the window list. macOS lays menus out around the physical
+    /// notch, so with a crowded menu bar some titles sit to the notch's
+    /// right -- which is why one "right edge of the menus" is not enough to
+    /// place anything.
+    struct Measurement: Equatable {
+        var menuItemFrames: [CGRect]
+        var statusItemFrames: [CGRect]
+    }
 
-    /// Menus change with the frontmost app, and within an app as its windows
-    /// change, so a slow poll backs up the activation notice. It runs only
-    /// while something actually needs the measurement.
-    private static let pollInterval: TimeInterval = 3
+    /// `nil` when nothing can be known -- no accessibility permission, an app
+    /// that exposes no menu bar, or a process that did not answer in time.
+    /// Callers treat that as "no constraint" rather than guessing.
+    @Published private(set) var measurement: Measurement?
+
+    /// Menus change with the frontmost app, so each activation is measured,
+    /// and again a little later for menus an app adds after it comes forward.
+    /// Upstream also scanned every 3 s for as long as the island was closed,
+    /// waking Skerry and the frontmost app with it all day; a menu that
+    /// changes while its app stays in front waits for the next activation.
+    static let followUpDelays: [TimeInterval] = [0.6, 2]
 
     private var observer: NSObjectProtocol?
-    private var pollTimer: Timer?
+    private var followUps: [DispatchWorkItem] = []
     private var trackers = 0
     private var inFlight = false
 
     private init() {}
 
-    /// How far right content of `contentWidth`, centred in `screenFrame`, has to
-    /// move so its left edge clears menus ending at `menusRightEdge`.
+    /// How far right content of `contentWidth`, centred in `screenFrame`, has
+    /// to move so it clears the menu titles it covers.
     ///
-    /// Zero when nothing is covered. Capped at the room remaining on the right,
-    /// because a shift that pushes the content off the far edge has traded one
-    /// covered thing for another.
+    /// Zero when nothing is covered. The move is clamped to the room on the
+    /// right -- up to the next menu title, status item, the island's own
+    /// window edge (`maxRightEdge`: content past it is clipped to a hard
+    /// black edge) or the screen edge -- so it changes smoothly with the width
+    /// instead of flipping, which made the island jump under the pointer.
+    ///
+    /// On a screen with a notch macOS lays out titles that do not fit left of
+    /// it to its right. One of those under the surface means both sides are
+    /// taken, and the island stays on the notch: before, the right edge of
+    /// all titles was taken for "where the menus end" and the island jumped
+    /// past the notch onto the status items (21.10).
+    ///
+    /// `menuBarBand` is this screen's menu bar in top-left global
+    /// coordinates, so a display stacked above or below does not count.
     nonisolated static func clearanceOffset(
         contentWidth: CGFloat,
         screenFrame: CGRect,
-        menusRightEdge: CGFloat,
+        measurement: Measurement,
+        menuBarBand: ClosedRange<CGFloat>,
+        hasNotch: Bool,
+        maxRightEdge: CGFloat,
         gap: CGFloat
     ) -> CGFloat {
         guard contentWidth > 0 else { return 0 }
-        let contentLeftEdge = screenFrame.midX - contentWidth / 2
-        let overlap = (menusRightEdge + gap) - contentLeftEdge
-        guard overlap > 0 else { return 0 }
-        let rightHeadroom = max(0, screenFrame.maxX - (contentLeftEdge + contentWidth))
-        return min(overlap, rightHeadroom)
+        let left = screenFrame.midX - contentWidth / 2
+        let right = left + contentWidth
+        let onThisMenuBar = { (frame: CGRect) in
+            menuBarBand.contains(frame.midY) && frame.midX >= screenFrame.minX && frame.midX <= screenFrame.maxX
+        }
+        let menus = measurement.menuItemFrames.filter(onThisMenuBar)
+        // Titles the surface covers, or sits flush against, ask for a move.
+        let covered = menus.filter { $0.maxX > left - gap && $0.minX < right }
+        guard let coveredEdge = covered.map(\.maxX).max() else { return 0 }
+        if hasNotch, covered.contains(where: { $0.minX >= screenFrame.midX }) { return 0 }
+        let wanted = coveredEdge + gap - left
+        guard wanted > 0 else { return 0 }
+
+        let obstacles = menus.filter { $0.minX >= right }.map(\.minX)
+            + measurement.statusItemFrames.filter(onThisMenuBar).map(\.minX)
+        let bound = min(maxRightEdge, screenFrame.maxX, (obstacles.min() ?? .greatestFiniteMagnitude) - gap)
+        return max(0, min(wanted, bound - right))
     }
+
+    /// How much the closed island grows while hovered: 8 pt in the middle and
+    /// up to 12 pt on each music wing. Clearance is worked out for the hovered
+    /// size, so hovering never changes the position.
+    nonisolated static let hoverGrowthAllowance: CGFloat = 32
 
     /// The closed island's black surface: the content plus the closed padding
     /// on each side. Clearance is measured on this, so the surface itself
@@ -87,16 +131,22 @@ final class MenuBarLayout: ObservableObject {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.refresh() }
+            MainActor.assumeIsolated { self?.refreshWithFollowUps() }
         }
 
-        let timer = Timer(timeInterval: Self.pollInterval, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.refresh() }
-        }
-        RunLoop.main.add(timer, forMode: .common)
-        pollTimer = timer
+        refreshWithFollowUps()
+    }
 
+    private func refreshWithFollowUps() {
         refresh()
+        followUps.forEach { $0.cancel() }
+        followUps = Self.followUpDelays.map { delay -> DispatchWorkItem in
+            let work = DispatchWorkItem { [weak self] in
+                MainActor.assumeIsolated { self?.refresh() }
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+            return work
+        }
     }
 
     func stopTracking() {
@@ -108,19 +158,19 @@ final class MenuBarLayout: ObservableObject {
             NSWorkspace.shared.notificationCenter.removeObserver(observer)
             self.observer = nil
         }
-        pollTimer?.invalidate()
-        pollTimer = nil
-        appMenusRightEdge = nil
+        followUps.forEach { $0.cancel() }
+        followUps.removeAll()
+        measurement = nil
     }
 
     func refresh() {
-        guard !inFlight else { return }
+        guard !inFlight, trackers > 0 else { return }
         guard AXIsProcessTrusted() else {
-            appMenusRightEdge = nil
+            measurement = nil
             return
         }
         guard let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier else {
-            appMenusRightEdge = nil
+            measurement = nil
             return
         }
 
@@ -128,11 +178,13 @@ final class MenuBarLayout: ObservableObject {
         // stopped answering would otherwise take the notch's UI down with it.
         inFlight = true
         Task.detached(priority: .utility) {
-            let edge = Self.menusRightEdge(pid: pid)
+            let measured = Self.menuItemFrames(pid: pid).map {
+                Measurement(menuItemFrames: $0, statusItemFrames: Self.statusItemFrames())
+            }
             await MainActor.run {
                 self.inFlight = false
                 guard self.trackers > 0 else { return }
-                if self.appMenusRightEdge != edge { self.appMenusRightEdge = edge }
+                if self.measurement != measured { self.measurement = measured }
             }
         }
     }
@@ -148,8 +200,28 @@ final class MenuBarLayout: ObservableObject {
     /// own, or a hung app would still block on the ones that inherited nothing.
     nonisolated private static let elementTimeout: Float = 0.25
 
-    /// The right edge of the last menu, or `nil` if the menu bar cannot be read.
-    nonisolated private static func menusRightEdge(pid: pid_t) -> CGFloat? {
+    /// The menu bar's status items, Skerry's own icon included: windows at the
+    /// status level, one per item, no taller than the menu bar. The island
+    /// (level 27) and the OSD (26) are left out by the level. Reading bounds
+    /// and layer needs no permission; only window names are gated.
+    nonisolated static func statusItemFrames() -> [CGRect] {
+        guard let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] else {
+            return []
+        }
+        let statusLevel = Int(CGWindowLevelForKey(.statusWindow))
+        return windows.compactMap { window in
+            guard let layer = window[kCGWindowLayer as String] as? Int, layer == statusLevel,
+                  let bounds = window[kCGWindowBounds as String] as? [String: CGFloat],
+                  let x = bounds["X"], let y = bounds["Y"],
+                  let width = bounds["Width"], let height = bounds["Height"],
+                  width > 0, height > 0, height <= 40
+            else { return nil }
+            return CGRect(x: x, y: y, width: width, height: height)
+        }
+    }
+
+    /// Every menu title's frame, or `nil` if the menu bar cannot be read.
+    nonisolated private static func menuItemFrames(pid: pid_t) -> [CGRect]? {
         let startedAt = Date()
         let app = AXUIElementCreateApplication(pid)
         // A hung app must not hold this up; the measurement is an optimisation,
@@ -168,7 +240,7 @@ final class MenuBarLayout: ObservableObject {
               let items = childrenValue as? [AXUIElement], !items.isEmpty
         else { return nil }
 
-        var rightEdge: CGFloat?
+        var frames: [CGRect] = []
         for item in items {
             // Whatever has been measured so far is still usable; a scan that has
             // run long is one where the app is not answering, and waiting out
@@ -188,8 +260,8 @@ final class MenuBarLayout: ObservableObject {
                   AXValueGetValue(sizeValue as! AXValue, .cgSize, &size)
             else { continue }
 
-            rightEdge = max(rightEdge ?? 0, origin.x + size.width)
+            frames.append(CGRect(origin: origin, size: size))
         }
-        return rightEdge
+        return frames.isEmpty ? nil : frames
     }
 }

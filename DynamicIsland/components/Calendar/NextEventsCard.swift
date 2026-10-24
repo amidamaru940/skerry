@@ -108,7 +108,10 @@ struct NextEventsCard: View {
     }
 }
 
-/// The card drawn from plain values.
+/// "Next" drawn from plain values: in E a line of time, not a card
+/// (docs/design/VISUAL-E.md §2.6). A vertical hairline, «ДАЛЕЕ» and the rows
+/// 12 to its right; each event's dot sits on the line, the nearest event of
+/// today lit in the accent. No card, no date, no calendar colours.
 struct NextEventsCardContent: View {
     let state: NextEvents.State
     let now: Date
@@ -118,17 +121,18 @@ struct NextEventsCardContent: View {
     var onOpen: (EventModel) -> Void = { _ in }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            NextEventsHeading(now: now)
-
+        TimeLineColumn(label: String(localized: "Next")) {
             switch state {
             case .noAccess:
-                Text("To see your next events, allow access to the calendar.")
-                    .font(.system(size: 12))
-                    .foregroundStyle(DS.Palette.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                Button(String(localized: "Allow Access"), action: onAllowAccess)
-                    .buttonStyle(DSButtonStyle(kind: .secondary, height: 26))
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("To see your next events, allow access to the calendar.")
+                        .eText(.body)
+                        .foregroundStyle(DSE.Palette.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button(String(localized: "Allow Access"), action: onAllowAccess)
+                        .buttonStyle(SecondaryKeyStyle())
+                        .fixedSize()
+                }
             case .free:
                 freeLine
             case .events(let events):
@@ -136,27 +140,26 @@ struct NextEventsCardContent: View {
             }
             if let onAllowReminders {
                 RemindersOfferRow(onAllow: onAllowReminders)
+                    .padding(.top, 4)
             }
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 12)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(
-            RoundedRectangle(cornerRadius: DS.Radius.panel, style: .continuous)
-                .fill(DS.Palette.surface)
-        )
     }
 
     private var freeLine: some View {
-        Label(String(localized: "Free for the rest of the day"), systemImage: "checkmark.circle")
-            .font(.system(size: 12))
-            .foregroundStyle(DS.Palette.textSecondary)
+        Text(String(localized: "Free for the rest of the day"))
+            .eText(.body)
+            .foregroundStyle(DSE.Palette.textSecondary)
+            .lineLimit(1)
+            .frame(height: DSE.Size.rowPitch, alignment: .leading)
     }
 
     @ViewBuilder
     private func eventRows(_ events: [EventModel]) -> some View {
-        VStack(alignment: .leading, spacing: 5) {
+        VStack(alignment: .leading, spacing: 0) {
             let firstTomorrow = events.firstIndex { NextEvents.day(of: $0, now: now) == .tomorrow }
+            // The one lit dot: the nearest timed event of today.
+            let current = events.firstIndex { !$0.isAllDay && NextEvents.day(of: $0, now: now) == .today }
             if firstTomorrow == 0 {
                 // Nothing left today: say so, then tomorrow.
                 freeLine
@@ -164,33 +167,35 @@ struct NextEventsCardContent: View {
             ForEach(Array(events.enumerated()), id: \.element.id) { index, event in
                 if index == firstTomorrow {
                     Text("Tomorrow")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(DS.Palette.textTertiary)
-                        .padding(.top, index == 0 ? 2 : 4)
+                        .eText(.caption)
+                        .foregroundStyle(DSE.Palette.textTertiary)
+                        .frame(height: 16, alignment: .bottomLeading)
                 }
-                NextEventRow(event: event, time: NextEvents.time(of: event, now: now)) {
+                TimeLineRow(
+                    time: NextEventRow.timeText(NextEvents.time(of: event, now: now)),
+                    title: event.title,
+                    isCurrent: index == current,
+                    help: String(localized: "Open in Calendar")
+                ) {
                     onOpen(event)
                 }
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(Text(verbatim: NextEventRow.accessibilityText(
+                    time: NextEvents.time(of: event, now: now),
+                    title: event.title,
+                    isTomorrow: NextEvents.day(of: event, now: now) == .tomorrow
+                )))
             }
         }
     }
 }
 
-/// "Next" and today's date.
+/// «ДАЛЕЕ» as a micro-label; E shows no date (VISUAL-E §2.6).
 private struct NextEventsHeading: View {
     let now: Date
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Text("Next")
-                .font(DS.Typeface.bodyEmphasis)
-                .foregroundStyle(DS.Palette.text)
-            Spacer(minLength: 0)
-            Text(now.formatted(.dateTime.weekday(.abbreviated).day().month(.abbreviated)))
-                .font(DS.Typeface.caption)
-                .foregroundStyle(DS.Palette.textTertiary)
-                .lineLimit(1)
-        }
+        MicroLabel(String(localized: "Next"))
     }
 }
 
@@ -246,6 +251,8 @@ struct NextEventLines: View {
     }
 }
 
+/// A line beside the compact player. E: a 6 pt dot (lit while the event is
+/// on) instead of the calendar's colour, and no fill under the pointer.
 private struct NextEventRow: View {
     let event: EventModel
     let time: NextEvents.Time
@@ -257,12 +264,16 @@ private struct NextEventRow: View {
     var body: some View {
         Button(action: action) {
             HStack(spacing: 8) {
-                Circle()
-                    .fill(Color(nsColor: event.calendar.color))
-                    .frame(width: 7, height: 7)
+                if time == .now {
+                    LitDot()
+                } else {
+                    Circle()
+                        .fill(DSE.Palette.textTertiary)
+                        .frame(width: DSE.Size.dot, height: DSE.Size.dot)
+                }
                 Text(timeText)
-                    .font(.system(size: 12, weight: .medium).monospacedDigit())
-                    .foregroundStyle(time == .now ? DS.Palette.accent : DS.Palette.textSecondary)
+                    .eText(.bodyTabular)
+                    .foregroundStyle(time == .now || isHovering ? DSE.Palette.text : DSE.Palette.textSecondary)
                     .lineLimit(1)
                     .frame(width: Self.timeColumnWidth, alignment: .leading)
                 if isTomorrow {
@@ -281,13 +292,9 @@ private struct NextEventRow: View {
             }
             .padding(.horizontal, 4)
             .frame(height: 20)
-            .background(
-                RoundedRectangle(cornerRadius: DS.Radius.chip, style: .continuous)
-                    .fill(isHovering ? DS.Palette.hoverFill : .clear)
-            )
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PressDimStyle())
         .onHover { hovering in withAnimation(DS.hover) { isHovering = hovering } }
         .help(String(localized: "Open in Calendar"))
         .accessibilityElement(children: .ignore)
@@ -302,10 +309,18 @@ private struct NextEventRow: View {
     }()
 
     private var accessibilityText: String {
-        ((isTomorrow ? [String(localized: "Tomorrow")] : []) + [timeText, event.title]).joined(separator: ", ")
+        Self.accessibilityText(time: time, title: event.title, isTomorrow: isTomorrow)
     }
 
-    private var timeText: String {
+    /// «Завтра, 10:00, Title»: the spoken row, with the day the line of
+    /// time shows only as a heading.
+    static func accessibilityText(time: NextEvents.Time, title: String, isTomorrow: Bool) -> String {
+        ((isTomorrow ? [String(localized: "Tomorrow")] : []) + [timeText(time), title]).joined(separator: ", ")
+    }
+
+    private var timeText: String { Self.timeText(time) }
+
+    static func timeText(_ time: NextEvents.Time) -> String {
         switch time {
         case .now: return String(localized: "Now")
         case .allDay: return String(localized: "All day")
@@ -320,13 +335,13 @@ struct RemindersOfferRow: View {
     let onAllow: () -> Void
 
     var body: some View {
-        HStack(spacing: 6) {
-            Label(String(localized: "Reminders too"), systemImage: "checklist")
-                .font(.system(size: 12))
-                .foregroundStyle(DS.Palette.textSecondary)
+        HStack(spacing: 8) {
+            Text(String(localized: "Reminders too"))
+                .eText(.body)
+                .foregroundStyle(DSE.Palette.textSecondary)
                 .lineLimit(1)
             Button(String(localized: "Allow Access"), action: onAllow)
-                .buttonStyle(DSButtonStyle(kind: .secondary, height: 22))
+                .buttonStyle(SecondaryKeyStyle(height: 22))
                 .fixedSize()
         }
     }

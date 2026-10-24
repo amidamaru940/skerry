@@ -406,9 +406,6 @@ struct ChatInputView: View {
                 .buttonStyle(PlainButtonStyle())
                 .help("Choose AI model")
                 
-                // Recording button
-                RecordingButton()
-                
                 // Send button
                 Button(action: sendMessage) {
                     Image(systemName: "paperplane.fill")
@@ -459,25 +456,10 @@ struct ChatInputView: View {
     }
     
     private func sendMessage() {
-        // Check if API key is configured for the selected provider
+        // Check if API key is configured for the selected provider.
+        // Local models don't need one.
         let provider = Defaults[.selectedAIProvider]
-        var apiKey = ""
-        
-        switch provider {
-        case .gemini:
-            apiKey = Defaults[.geminiApiKey]
-        case .openai:
-            apiKey = Defaults[.openaiApiKey]
-        case .claude:
-            apiKey = Defaults[.claudeApiKey]
-        case .local:
-            // Local models don't need API keys
-            apiKey = "local"
-        case .groq:
-            apiKey = Defaults[.groqApiKey]
-        }
-        
-        if apiKey.isEmpty {
+        if provider != .local && ScreenAssistantKeys.key(forProvider: provider) == nil {
             showingApiKeyAlert = true
             return
         }
@@ -603,7 +585,7 @@ struct StreamingChatMessageBubble: View {
     }
 }
 
-// MARK: - Note: Shared Components (MarkdownText, AttachedFileChip, AddFilesButton, RecordingButton, ApiKeyAlertView) 
+// MARK: - Note: Shared Components (MarkdownText, AttachedFileChip, AddFilesButton) 
 // are defined in ScreenAssistantPanel.swift to avoid redeclaration conflicts.
 
 // MARK: - Screenshot Button Component

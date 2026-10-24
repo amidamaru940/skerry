@@ -12,7 +12,6 @@
 "NSDownloadsFolderUsageDescription" = "Skerry нужен доступ, чтобы читать файлы в папке «Загрузки».";
 "NSLocationUsageDescription" = "Skerry использует геопозицию, чтобы показывать точную погоду на экране блокировки.";
 "NSLocationWhenInUseUsageDescription" = "Skerry использует геопозицию, чтобы показывать точную погоду на экране блокировки.";
-"NSMicrophoneUsageDescription" = "Skerry нужен микрофон, чтобы записывать голосовые вопросы для ИИ-ассистента.";
 "NSRemindersFullAccessUsageDescription" = "Skerry нужен доступ к Напоминаниям, чтобы показывать ваши напоминания.";
 "NSRemindersUsageDescription" = "Skerry нужен доступ к Напоминаниям, чтобы показывать ваши напоминания.";
 "NSScreenCaptureUsageDescription" = "Skerry нужна запись экрана, чтобы делать снимки для ИИ-ассистента.";

@@ -20,6 +20,7 @@ import Foundation
 import SwiftUI
 import Observation
 import Defaults
+import Combine
 
 /// The half-finished files browsers leave in the Downloads folder, and the
 /// finished file each one is going to turn into.
@@ -92,6 +93,18 @@ class DownloadManager {
     /// before there are two samples to measure between.
     private(set) var downloadSpeed: Double?
 
+    /// No byte arrived for `stallAfter`: the spinner holds still and the
+    /// once-a-second sampling stops until the folder changes again. A partial
+    /// file left behind by a crashed browser kept both going for ever.
+    private(set) var isStalled: Bool = false
+    nonisolated static let stallAfter: TimeInterval = 60
+    /// Follows the "listen for downloads" setting. Upstream dropped the
+    /// subscription as soon as it was made, so the switch did nothing.
+    private var listenerSetting: AnyCancellable?
+    /// Follows `downloadsFolderTouched`, which Shelf settings can set too.
+    private var folderAsked: AnyCancellable?
+    private var lastGrowthAt: Date?
+
     private var speedTimer: Timer?
     private var lastSpeedSample: DownloadsSample?
     /// Changes whenever sampling starts or stops.
@@ -138,21 +151,58 @@ class DownloadManager {
         FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
     }
     
-    init() {
-        requestDownloadsPermissionIfNeeded()
-        startMonitoringIfNeeded()
-        
-        Defaults.publisher(.enableDownloadListener)
-            .sink { [weak self] _ in
-                guard let self else { return }
-                Task { @MainActor in
-                    self.startMonitoringIfNeeded()
-                }
-            }
+    init() {}
+
+    /// Called once at launch. Opening Downloads is what asks for access, and
+    /// the call blocks until that is answered, so it is opened off the main
+    /// thread (ProtectedFolder). And only once the person asked for
+    /// downloads (§5.8): the listener is on by default, and a fresh install
+    /// was asked at launch. Until `downloadsFolderTouched` is set it waits
+    /// for its switch to be turned on, or for «Request Folder Access» in
+    /// Shelf settings; an install that ran an earlier build has the flag
+    /// (`migrateFolderFirstTouch`) and starts at launch as before.
+    func startAtLaunch() {
+        let folder = AppRuntimeEnvironment.mayAskForPermissions
+            && Self.watches(listenerOn: Defaults[.enableDownloadListener], folderTouched: Defaults[.downloadsFolderTouched])
+            ? downloadsDirectory
+            : nil
+        ProtectedFolder.touch(folder) { [weak self] in
+            guard let self else { return }
+            self.startMonitoringIfNeeded()
+            // From here on: before the first start, a change of the setting
+            // has nothing to stop or start yet.
+            self.listenerSetting = Defaults.publisher(.enableDownloadListener, options: [])
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] change in self?.listenerSettingChanged(to: change.newValue) }
+            // Shelf settings asked for Downloads: the listener may start now.
+            self.folderAsked = Defaults.publisher(.downloadsFolderTouched, options: [])
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] _ in self?.startMonitoringIfNeeded() }
+        }
     }
-    
+
+    /// The listener watches ~/Downloads while its switch is on, once the
+    /// folder was opened after the person asked for it.
+    nonisolated static func watches(listenerOn: Bool, folderTouched: Bool) -> Bool {
+        listenerOn && folderTouched
+    }
+
+    /// Turning the switch on is asking for downloads. Downloads is opened
+    /// off the main thread first, since the first time macOS asks and the
+    /// call waits for the answer; the flag is set once it has answered.
+    private func listenerSettingChanged(to on: Bool) {
+        guard on, AppRuntimeEnvironment.mayAskForPermissions else {
+            startMonitoringIfNeeded()
+            return
+        }
+        ProtectedFolder.touch(downloadsDirectory) { [weak self] in
+            Defaults[.downloadsFolderTouched] = true
+            self?.startMonitoringIfNeeded()
+        }
+    }
+
     private func startMonitoringIfNeeded() {
-        if Defaults[.enableDownloadListener] {
+        if Self.watches(listenerOn: Defaults[.enableDownloadListener], folderTouched: Defaults[.downloadsFolderTouched]) {
             startMonitoring()
         } else {
             stopMonitoring()
@@ -240,10 +290,13 @@ class DownloadManager {
         lastSpeedSample = nil
         smoothedSpeed = nil
         downloadSpeed = nil
+        isStalled = false
+        lastGrowthAt = Date()
 
         let timer = Timer(timeInterval: Self.speedSampleInterval, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.sampleSpeed() }
         }
+        timer.tolerance = 0.2
         RunLoop.main.add(timer, forMode: .common)
         speedTimer = timer
         sampleSpeed()
@@ -256,6 +309,20 @@ class DownloadManager {
         lastSpeedSample = nil
         smoothedSpeed = nil
         downloadSpeed = nil
+        isStalled = false
+        lastGrowthAt = nil
+    }
+
+    /// Nothing has grown for `stallAfter`: stop sampling (the download stays
+    /// shown). The next change in the folder starts it again.
+    private func noteStall(now: Date) {
+        speedSession &+= 1
+        speedTimer?.invalidate()
+        speedTimer = nil
+        lastSpeedSample = nil
+        smoothedSpeed = nil
+        downloadSpeed = nil
+        isStalled = true
     }
 
     private func sampleSpeed() {
@@ -278,6 +345,15 @@ class DownloadManager {
         // A reading measured before the current sampling session began says
         // nothing about it.
         guard session == speedSession else { return }
+
+        if let previous = lastSpeedSample, reading.bytes <= previous.bytes, reading.files == previous.files {
+            if let lastGrowthAt, reading.takenAt.timeIntervalSince(lastGrowthAt) >= Self.stallAfter {
+                noteStall(now: reading.takenAt)
+                return
+            }
+        } else {
+            lastGrowthAt = reading.takenAt
+        }
 
         defer { lastSpeedSample = reading }
 
@@ -539,11 +615,6 @@ class DownloadManager {
     /// Listing the folder is what asks for access to Downloads. Only when the
     /// download listener is on -- it used to ask on every launch, with the
     /// feature off -- and never from a test host.
-    private func requestDownloadsPermissionIfNeeded() {
-        guard AppRuntimeEnvironment.mayAskForPermissions, Defaults[.enableDownloadListener] else { return }
-        guard let downloadsDirectory else { return }
-        _ = try? FileManager.default.contentsOfDirectory(at: downloadsDirectory, includingPropertiesForKeys: nil)
-    }
     
     private func updateDownloadingState(isActive: Bool) {
         completionTimer?.invalidate()

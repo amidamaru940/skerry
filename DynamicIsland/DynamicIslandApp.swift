@@ -422,14 +422,27 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         window.islandViewModel = viewModel
         window.onIslandKeyCommand = { [weak self] in self?.cancelPendingNotchAutoClose() }
 
-        window.contentView = FirstMouseHostingView(
+        let host = FirstMouseHostingView(
             rootView: ContentView()
                 .environmentObject(viewModel)
                 .environmentObject(webcamManager)
                 //.moveToSky()
         )
+        // The window is sized by adjustedSizeForScreen, never by SwiftUI: left
+        // to its defaults the hosting view also sets the window's min/max size
+        // on every layout, and as the window's contentView it also resizes
+        // the window itself; either re-entered Update Constraints until AppKit
+        // threw (crash reports 23.10).
+        host.sizingOptions = []
+        window.setSelfSizedContent(host)
         
-        window.orderFrontRegardless()
+        // Displays change while the screen is locked (closing the lid does
+        // it), and the window made then has to stay out like the others until
+        // the unlock brings them all back; shown, it drew and ran its loops
+        // behind the lock screen.
+        if !windowsHiddenForLock {
+            window.orderFrontRegardless()
+        }
         NotchSpaceManager.shared.notchSpace.windows.insert(window)
         //SkyLightOperator.shared.delegateWindow(window)
         return window
@@ -631,15 +644,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// Adds Dynamic Island shadow/top insets on non-notch screens, or top bleed on physical-notch screens.
+    /// With a notch also the menu-bar band the open island hangs below
+    /// (`OpenIslandNeck`): open, its header and content start under the menu
+    /// bar. The band stays in the window while closed too, transparent, so
+    /// opening never has to wait for the window to grow.
     private func adjustedSizeForScreen(_ baseSize: CGSize, screen: NSScreen) -> CGSize {
-        var adjusted = baseSize
-        if shouldUseDynamicIslandMode(for: screen.localizedName) {
-            adjusted.width += dynamicIslandShadowInset * 2
-            adjusted.height += dynamicIslandTopOffset
-        } else {
-            adjusted.height += notchTopScreenBleed(for: screen.localizedName)
-        }
-        return adjusted
+        let dynamicIslandMode = shouldUseDynamicIslandMode(for: screen.localizedName)
+        return OpenIslandNeck.windowSize(
+            for: baseSize,
+            dynamicIslandMode: dynamicIslandMode,
+            topBleed: notchTopScreenBleed(for: screen.localizedName),
+            bandHeight: dynamicIslandMode ? 0 : OpenIslandNeck.bandHeight(for: screen)
+        )
     }
 
     func ensureWindowSize(_ size: CGSize, animated: Bool, force: Bool = false) {
@@ -690,6 +706,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // A Skerry that crashed or was force-quit may have left system processes
+        // frozen: the volume/brightness HUD (OSDUIHelper) and, with the lock-screen
+        // artwork shown, the wallpaper renderers and a rewritten wallpaper. Undone first,
+        // unless this is the test host or another Skerry is running: that one froze
+        // them on purpose (LaunchRecoveryGate).
+        if LaunchRecoveryGate.recoversAtThisLaunch {
+            ProcessSignals.continueProcesses(named: ["OSDUIHelper"])
+            DispatchQueue.global(qos: .utility).async {
+                FullScreenArtworkWindowManager.recoverAfterUncleanExit()
+            }
+        }
         let userInfo: [String: Any] = [
             AtollDistributedNotifications.UserInfoKey.sourcePID: NSNumber(value: ProcessInfo.processInfo.processIdentifier)
         ]
@@ -700,19 +727,36 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             deliverImmediately: true
         )
 
+        // Sleep, screen sleep, lock and session changes, from launch on:
+        // everything that runs on its own clock follows it.
+        _ = ActivityGate.shared
         LockScreenLiveActivityWindowManager.shared.configure(viewModel: vm)
         // Copies of clipboard pictures left in the temp folder by upstream's drag code.
         ClipboardTemporaryFiles.removeLegacyDragCopies()
         // The unit-test host must not watch (or ask for) the real screenshot
         // folder, nor read the real clipboard.
         if !AppRuntimeEnvironment.isHostingUnitTests {
-            ScreenshotShelfManager.shared.start()
+            // The screenshot folder is usually the Desktop, and ~/Downloads is
+            // guarded too: the first look at either brings up a macOS prompt.
+            // A fresh install leaves them alone until the person asks for
+            // screenshots or downloads (§5.8); an install that ran an earlier
+            // build is given the first-touch flags here and starts both at
+            // launch as before. The looks are taken off the main thread.
+            Defaults.Keys.migrateFolderFirstTouch()
+            ScreenshotShelfManager.shared.startAtLaunch()
+            DownloadManager.shared.startAtLaunch()
             ShelfFlashModel.shared.start(items: ShelfStateViewModel.shared.$items.map { $0.map(\.id) }.eraseToAnyPublisher())
             ClipboardPaster.trackFrontmostApps()
             // History is collected from launch, not only after the clipboard is first opened.
             if Defaults[.enableClipboardManager] {
                 ClipboardManager.shared.startMonitoring()
             }
+        }
+        // Screen Assistant API keys leave UserDefaults for the Keychain: off
+        // the main thread, before the assistant first reads one, never with a
+        // window. Not in the test host: it would write to the real Keychain.
+        if !AppRuntimeEnvironment.isHostingUnitTests {
+            ScreenAssistantKeys.migrateAtLaunch()
         }
         LockScreenManager.shared.configure(viewModel: vm)
         applyThirdPartyExtensionsEnabled(Defaults[.enableThirdPartyExtensions])
@@ -746,6 +790,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         applySelectedAppIcon()
         installTopMenuItemsIfNeeded()
+
+        // Design review only, with -SkerryGallery <folder>; nothing otherwise.
+        GalleryMode.startIfRequested(vm: vm) { [weak self] in
+            self?.window ?? self?.windows.values.first
+        }
 
         Defaults.publisher(.focusMonitoringMode, options: [])
             .receive(on: DispatchQueue.main)
@@ -798,6 +847,21 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             setupAudioTapMusicObservers()
         }
         
+        // The waveform tap (an audio device IO proc and a 30 Hz timer) stops
+        // while the Mac or its screen sleeps and starts again on return.
+        ActivityGate.shared.publisher(for: .screenInUse)
+            .dropFirst()
+            .receive(on: DispatchQueue.main)
+            .sink { inUse in
+                guard Defaults[.enableRealTimeWaveform] else { return }
+                if inUse {
+                    Task { await AudioTap.shared.startCapture() }
+                } else {
+                    AudioTap.shared.stopCapture()
+                }
+            }
+            .store(in: &cancellables)
+
         // Observe enableRealTimeWaveform changes
         Defaults.publisher(.enableRealTimeWaveform, options: [])
             .receive(on: DispatchQueue.main)
@@ -1108,8 +1172,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 viewModel.open()
                 self.giveKeyboardFocus(to: viewModel)
 
-                let workItem = DispatchWorkItem { [weak viewModel] in
-                    viewModel?.close()
+                let workItem = DispatchWorkItem { [weak self, weak viewModel] in
+                    self?.closeAfterShortcutOpen(viewModel)
                 }
                 self.closeNotchWorkItem = workItem
 
@@ -1406,6 +1470,28 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         closeNotchWorkItem = nil
     }
 
+    /// The open-island shortcut shows the island for a look and closes it 3 s
+    /// later. Not while something holds it open -- a drag out of it, a popover
+    /// -- which the plain close() cut short; then it tries again a second later.
+    /// Hovering the island hands it to the hover logic instead (handleHover).
+    private func closeAfterShortcutOpen(_ viewModel: DynamicIslandViewModel?) {
+        guard let viewModel, viewModel.notchState == .open else { return }
+        let held = viewModel.isAutoCloseSuppressed
+            || ScreenshotShelfManager.shared.isDragging
+            || ShelfSelectionModel.shared.isDragging
+            || ClipboardManager.shared.isDraggingItem
+        guard held else {
+            closeNotchWorkItem = nil
+            viewModel.close()
+            return
+        }
+        let retry = DispatchWorkItem { [weak self, weak viewModel] in
+            self?.closeAfterShortcutOpen(viewModel)
+        }
+        closeNotchWorkItem = retry
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1, execute: retry)
+    }
+
     private func registerOptionalShortcutHandlers() {
         guard !optionalShortcutHandlersRegistered else { return }
         optionalShortcutHandlersRegistered = true
@@ -1447,15 +1533,27 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     }
                 }
             case .notchTab:
+                // Buffer v3: the history shortcut opens on «Все».
+                if vm.notchState == .closed || coordinator.currentView != .clipboard {
+                    BufferTabState.shared.segment = .all
+                }
                 toggleIslandTab(.clipboard)
             }
         }
 
+        // The screenshots live in «Буфер» since step D4, under «Снимки»; the
+        // shortcut asked for a tab that is never shown and did nothing.
         KeyboardShortcuts.onKeyDown(for: .openScreenshotsTab) { [weak self] in
             guard let self else { return }
             guard Defaults[.enableShortcuts], Defaults[.enableScreenshotShelf],
-                  NotchTabLayout.isVisible(.screenshots) else { return }
-            toggleIslandTab(.screenshots)
+                  NotchTabLayout.isVisible(.clipboard) else { return }
+            let action = BufferLayout.shotsShortcut(
+                islandOpen: vm.notchState == .open,
+                onBuffer: coordinator.currentView == .clipboard,
+                segment: BufferTabState.shared.segment
+            )
+            if action.showsShots { ScreenshotShelfManager.shared.openShotsByRequest() }
+            if action.togglesTab { toggleIslandTab(.clipboard) }
         }
 
         KeyboardShortcuts.onKeyDown(for: .playPause) {

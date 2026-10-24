@@ -18,6 +18,7 @@
 
 import AppKit
 import Combine
+import Defaults
 import Foundation
 
 enum FullDiskAccessAuthorization {
@@ -62,16 +63,14 @@ enum ShelfFolderAccessAuthorization {
         FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
     }
 
+    /// Reading a folder macOS has not answered for yet is the prompt: only
+    /// for a folder whose first-touch flag is set, and off the main thread.
     static func hasDocumentsAccess() -> Bool {
         canReadDirectory(at: documentsDirectoryURL)
     }
 
     static func hasDownloadsAccess() -> Bool {
         canReadDirectory(at: downloadsDirectoryURL)
-    }
-
-    static func hasDocumentsAndDownloadsAccess() -> Bool {
-        hasDocumentsAccess() && hasDownloadsAccess()
     }
 
     static func requestAccessProbe() {
@@ -177,35 +176,61 @@ final class FullDiskAccessPermissionStore: ObservableObject {
     }
 }
 
+/// The Documents and Downloads rows of Shelf settings.
+///
+/// Reading a folder to fill its row is what brings up the macOS prompt, so
+/// a folder Skerry has not asked for yet is not read: it shows as not
+/// allowed, with «Request Folder Access», until that is clicked ("unknown
+/// until asked", docs/design/REDESIGN-SPEC.md §5.8). A folder macOS has
+/// answered for (its first-touch flag is set) is read, off the main thread;
+/// until that read is back the row assumes it is allowed, which is what an
+/// install that granted it saw before.
 @MainActor
 final class ShelfFolderAccessPermissionStore: ObservableObject {
     static let shared = ShelfFolderAccessPermissionStore()
 
-    @Published private(set) var hasDocumentsAccess: Bool = ShelfFolderAccessAuthorization.hasDocumentsAccess()
-    @Published private(set) var hasDownloadsAccess: Bool = ShelfFolderAccessAuthorization.hasDownloadsAccess()
+    @Published private(set) var hasDocumentsAccess: Bool = Defaults[.documentsFolderTouched]
+    @Published private(set) var hasDownloadsAccess: Bool = Defaults[.downloadsFolderTouched]
 
     var hasDocumentsAndDownloadsAccess: Bool {
         hasDocumentsAccess && hasDownloadsAccess
     }
 
-    private var pollingTask: Task<Void, Never>?
+    /// Replaces upstream's 20 s of polling, on the main thread, after a request.
+    private var activation: AnyCancellable?
 
-    private init() {}
-
-    deinit {
-        pollingTask?.cancel()
+    private init() {
+        refreshStatus()
+        // Allowed or refused in System Settings: read again when the person
+        // comes back to Skerry.
+        activation = NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.refreshStatus() }
     }
 
     func refreshStatus() {
-        updateStatus(
-            documents: ShelfFolderAccessAuthorization.hasDocumentsAccess(),
-            downloads: ShelfFolderAccessAuthorization.hasDownloadsAccess()
-        )
+        let readsDocuments = Defaults[.documentsFolderTouched]
+        let readsDownloads = Defaults[.downloadsFolderTouched]
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let documents = readsDocuments && ShelfFolderAccessAuthorization.hasDocumentsAccess()
+            let downloads = readsDownloads && ShelfFolderAccessAuthorization.hasDownloadsAccess()
+            Task { @MainActor in self?.updateStatus(documents: documents, downloads: downloads) }
+        }
     }
 
+    /// «Request Folder Access»: macOS asks for each folder in turn, off the
+    /// main thread, and the rows are read once both are answered. From then
+    /// on they are read whenever Shelf settings open.
     func requestAccessPrompt() {
-        ShelfFolderAccessAuthorization.requestAccessProbe()
-        beginPollingForStatusChanges()
+        guard AppRuntimeEnvironment.mayAskForPermissions else { return }
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            ShelfFolderAccessAuthorization.requestAccessProbe()
+            Task { @MainActor in
+                Defaults[.documentsFolderTouched] = true
+                Defaults[.downloadsFolderTouched] = true
+                self?.refreshStatus()
+            }
+        }
     }
 
     func openSystemSettings() {
@@ -222,28 +247,6 @@ final class ShelfFolderAccessPermissionStore: ObservableObject {
             }
         }
 #endif
-    }
-
-    private func beginPollingForStatusChanges() {
-        pollingTask?.cancel()
-        pollingTask = Task { [weak self] in
-            guard let self else { return }
-
-            for _ in 0..<40 {
-                try? await Task.sleep(nanoseconds: 500_000_000)
-
-                let docs = ShelfFolderAccessAuthorization.hasDocumentsAccess()
-                let downloads = ShelfFolderAccessAuthorization.hasDownloadsAccess()
-
-                await MainActor.run {
-                    self.updateStatus(documents: docs, downloads: downloads)
-                }
-
-                if docs && downloads {
-                    break
-                }
-            }
-        }
     }
 
     private func updateStatus(documents: Bool, downloads: Bool) {

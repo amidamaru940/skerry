@@ -91,3 +91,81 @@ final class PanelsTests: XCTestCase {
         }
     }
 }
+
+/// The island and the picture preview are sized by Skerry alone. With the
+/// hosting view as the window's contentView, SwiftUI resized the window too
+/// when its content grew, and the two re-entered Update Constraints until
+/// AppKit threw (crashes 23.10, 09:53 and 10:20).
+final class SelfSizedWindowTests: XCTestCase {
+    private final class Height: ObservableObject {
+        @Published var value: CGFloat = 50
+    }
+
+    private struct Root: View {
+        @ObservedObject var height: Height
+        var body: some View { Color.clear.frame(width: 200, height: height.value) }
+    }
+
+    /// The control needs the SwiftUI App lifecycle, which the test host
+    /// (Skerry itself) has; without a host app it would fail.
+    @MainActor
+    func testSwiftUIDoesNotResizeASelfSizedWindow() {
+        XCTAssertNotEqual(windowHeightAfterTheContentGrows(selfSized: false), 100,
+                          "as contentView the hosting view resizes the window: the test sees it")
+        XCTAssertEqual(windowHeightAfterTheContentGrows(selfSized: true), 100)
+    }
+
+    @MainActor
+    func testTheHostFillsTheWindowAndFollowsItsSize() {
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 200, height: 100),
+                              styleMask: [.borderless], backing: .buffered, defer: true)
+        let host = NSHostingView(rootView: Color.clear)
+        window.setSelfSizedContent(host)
+        XCTAssertFalse(window.contentView is NSHostingView<Color>)
+        XCTAssertTrue(host.superview === window.contentView)
+        XCTAssertEqual(host.frame.size, NSSize(width: 200, height: 100))
+        window.setContentSize(NSSize(width: 300, height: 150))
+        XCTAssertEqual(host.frame.size, NSSize(width: 300, height: 150))
+
+        // The picture preview starts at .zero and is sized from its content.
+        // Its own hosting view, with sizingOptions = [], measures 0 × 0: the
+        // preview was an empty panel from 1.1.2 to 1.1.4.
+        let content = Color.clear.frame(width: 120, height: 80)
+        let panel = NSPanel(contentRect: .zero, styleMask: [.borderless], backing: .buffered, defer: true)
+        let preview = NSHostingView(rootView: content)
+        preview.sizingOptions = []
+        panel.setSelfSizedContent(preview)
+        panel.setFrame(NSRect(origin: .zero, size: ClipboardPreviewPanel.measuredSize(of: content)), display: false)
+        XCTAssertEqual(preview.frame.size, NSSize(width: 120, height: 80))
+    }
+
+    /// Shows a 200 × 100 window (out of sight), grows its content to 300 pt
+    /// in an animation, and returns the window's height after it.
+    @MainActor
+    private func windowHeightAfterTheContentGrows(selfSized: Bool) -> CGFloat {
+        let height = Height()
+        let window = NSPanel(contentRect: NSRect(x: -4000, y: -4000, width: 200, height: 100),
+                             styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.alphaValue = 0
+        let host = NSHostingView(rootView: Root(height: height))
+        host.sizingOptions = []
+        if selfSized {
+            window.setSelfSizedContent(host)
+        } else {
+            window.contentView = host
+        }
+        window.orderFrontRegardless()
+        defer {
+            window.orderOut(nil)
+            window.close()
+        }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+        withAnimation(.linear(duration: 0.1)) { height.value = 300 }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+        if selfSized {
+            XCTAssertEqual(host.frame.size, window.contentView?.bounds.size, "the shown window's content fills it")
+        }
+        return window.frame.height
+    }
+}

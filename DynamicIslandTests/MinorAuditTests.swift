@@ -58,7 +58,7 @@ final class MinorAuditTests: XCTestCase {
     func testTheScreenshotGridFillsItsWidth() {
         let grid = ScreenshotGridLayout.columns(width: 480, minimumTile: 110)
         XCTAssertEqual(grid.count, 4)
-        XCTAssertEqual(grid.tile, 114, "stretched from 110 to share the row")
+        XCTAssertEqual(grid.tile, 113, "stretched from 110 to share the row (Buffer v3: the 9 pt film gap)")
         for width in stride(from: CGFloat(200), through: 900, by: 37) {
             for minimum in [CGFloat(70), 110, 200] {
                 let g = ScreenshotGridLayout.columns(width: width, minimumTile: minimum)

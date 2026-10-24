@@ -161,7 +161,8 @@ class ForkConfigurationTests(unittest.TestCase):
         for tool in ("notarytool", "altool", "curl ", "wget "):
             self.assertNotIn(tool, script)
         self.assertIn('shasum -a 256 "${DMG:t}"', script, "the published checksum names the file, not a local path")
-        self.assertIn("-file-prefix-map $HOME=~", script, "source paths in the binary must not name the builder's home")
+        self.assertIn('-file-prefix-map \\"$HOME=~\\"', script, "source paths in the binary must not name the builder's home")
+        self.assertIn('-file-prefix-map \\"$ROOT_ABS=.\\"', script, "quoted, or xcodebuild splits a path with a space")
         self.assertIn('grep -rlaF "$HOME/" "$APP"', script)
         self.assertIn("STRIP_STYLE=debugging", script, "the debug map names the build folder")
         self.assertIn("ENABLE_CODE_COVERAGE=NO", script)

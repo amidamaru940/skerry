@@ -662,6 +662,7 @@ final class SystemBrightnessController {
     private var pendingAdjustTarget: Float?
     private let coreBrightnessClient = CoreBrightnessDisplayClient.shared
     private var pollTimer: Timer?
+    private var pollsAfterKeyPresses = false
     private let pollInterval: TimeInterval = 0.15
     private let pollChangeThreshold: Float = 0.005
 
@@ -690,12 +691,12 @@ final class SystemBrightnessController {
             NSLog("⚠️ SystemBrightnessController: CoreBrightnessDisplayClient unavailable; will rely on DisplayServices / IODisplay + polling fallback")
         }
         notifyCurrentBrightness()
-        // Only start polling as a fallback when CoreBrightness notifications
-        // are unavailable.  When CoreBrightness IS available the distributed
-        // notifications (registerExternalNotifications) handle detection.
-        if !coreBrightnessClient.isAvailable {
-            startPolling()
-        }
+        // Only poll as a fallback when CoreBrightness notifications are
+        // unavailable, and then only in the moments after a brightness key
+        // (`markUserInitiated`): the HUD shows for nothing else, and
+        // `beginBrightnessAnimation` re-reads the baseline anyway. Upstream
+        // polled 7 times a second for as long as the app ran.
+        pollsAfterKeyPresses = !coreBrightnessClient.isAvailable
     }
 
     func stop() {
@@ -742,9 +743,12 @@ final class SystemBrightnessController {
     /// Automatically resets after `userInitiatedWindow` seconds.
     private func markUserInitiated() {
         userInitiatedBrightnessChange = true
+        if pollsAfterKeyPresses { startPolling() }
         userInitiatedResetTimer?.invalidate()
         userInitiatedResetTimer = Timer.scheduledTimer(withTimeInterval: userInitiatedWindow, repeats: false) { [weak self] _ in
             self?.userInitiatedBrightnessChange = false
+            self?.pollTimer?.invalidate()
+            self?.pollTimer = nil
         }
     }
 

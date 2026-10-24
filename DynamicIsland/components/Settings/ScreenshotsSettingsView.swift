@@ -43,7 +43,10 @@ struct ScreenshotsSettingsView: View {
     var body: some View {
         Form {
             Section {
-                Defaults.Toggle(key: .enableScreenshotShelf) {
+                // One feature: the switch takes the clipboard part along
+                // (ScreenshotFeature); the clipboard part can then be turned
+                // off on its own below.
+                Toggle(isOn: Binding(get: { enabled }, set: { ScreenshotFeature.setEnabled($0) })) {
                     Text("Collect new screenshots")
                 }
                 .settingsHighlight(id: highlightID("Collect new screenshots"))
@@ -163,10 +166,13 @@ struct ScreenshotsSettingsView: View {
             manager.refreshFolder()
             refreshThumbnailState()
         }
+        // Collecting turned on here is the person asking for screenshots:
+        // the folder is first looked at then on a fresh install (§5.8). The
+        // clipboard part alone needs no folder, so it asks for none.
+        .onChange(of: enabled) { _, on in if on { manager.startOnFirstUse() } }
         .confirmationDialog("Save screenshots to ~/Screenshots?", isPresented: $confirmUseFolder) {
             Button("Use ~/Screenshots") {
-                folderChangeFailed = !ScreenshotSystemSettings.useFolder(recommended)
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1) { manager.refreshFolder() }
+                folderChangeFailed = !manager.useRecommendedFolder()
             }
             Button("Cancel", role: .cancel) {}
         } message: {

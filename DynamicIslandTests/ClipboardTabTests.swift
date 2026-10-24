@@ -274,16 +274,24 @@ final class ClipboardTabManagerTests: XCTestCase {
         let savedTrusted = ClipboardPaster.isAccessibilityTrusted
         let savedActivate = ClipboardPaster.activateTarget
         let savedPost = ClipboardPaster.postPasteKeystroke
+        let savedReturn = ClipboardPaster.returnIslandKeyboard
         defer {
             ClipboardPaster.isAccessibilityTrusted = savedTrusted
             ClipboardPaster.activateTarget = savedActivate
             ClipboardPaster.postPasteKeystroke = savedPost
+            ClipboardPaster.returnIslandKeyboard = savedReturn
         }
         var activated: NSRunningApplication?
+        var keyboardReturned = false
         let pressed = expectation(description: "⌘V pressed")
         ClipboardPaster.isAccessibilityTrusted = { true }
         ClipboardPaster.activateTarget = { activated = $0 }
-        ClipboardPaster.postPasteKeystroke = { pressed.fulfill() }
+        // The closed island gives the keyboard back before the ⌘V (23.10).
+        ClipboardPaster.returnIslandKeyboard = { keyboardReturned = true }
+        ClipboardPaster.postPasteKeystroke = {
+            XCTAssertTrue(keyboardReturned)
+            pressed.fulfill()
+        }
 
         var closed = false
         let item = ClipboardItem(stringData: "paste me", type: .text)
@@ -333,7 +341,7 @@ final class ClipboardDragTests: XCTestCase {
         return Set(names.filter { $0.hasPrefix("clipboard_image_") })
     }
 
-    func testAPictureDragsAsPNGAndAFilePromiseWithoutTemporaryFiles() throws {
+    func testAPictureDragsAsARealTemporaryFileAndItsPNG() throws {
         let savedPersist = Defaults[.persistClipboardHistory]
         Defaults[.persistClipboardHistory] = false
         defer { Defaults[.persistClipboardHistory] = savedPersist }
@@ -343,15 +351,38 @@ final class ClipboardDragTests: XCTestCase {
         let item = ClipboardItem(imageData: png)
         XCTAssertNil(item.imageFileName, "a memory-only picture")
         let writers = ClipboardDragWriters.writers(for: item)
-        let provider = try XCTUnwrap(writers.first as? ClipboardImagePromiseProvider)
         XCTAssertEqual(writers.count, 1)
+        let pasteboardItem = try XCTUnwrap(writers.first as? NSPasteboardItem)
 
+        // Chats and browsers (Chromium, Electron) take a dropped picture only
+        // as a file: it must be a real one, already on disk at the drop.
+        let fileURL = try XCTUnwrap(pasteboardItem.string(forType: .fileURL).flatMap(URL.init(string:)))
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+        XCTAssertTrue(TemporaryClipboardShots.isTemporary(fileURL), "in the folder emptied at launch, quit and after a day")
+        XCTAssertEqual(try Data(contentsOf: fileURL), png)
+        XCTAssertEqual(pasteboardItem.data(forType: .png), png, "the picture itself rides along")
+
+        XCTAssertEqual(legacyCopies(), before, "no upstream-style copies in the temporary folder's root")
+    }
+
+    func testADraggedPictureNeverReplacesAnEarlierOne() throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("amg-drag-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let first = try XCTUnwrap(ClipboardDragWriters.temporaryFile(png: Data([1]), named: "Clipboard Image x.png", folder: folder))
+        let second = try XCTUnwrap(ClipboardDragWriters.temporaryFile(png: Data([2]), named: "Clipboard Image x.png", folder: folder))
+        XCTAssertNotEqual(first, second)
+        XCTAssertEqual(second.lastPathComponent, "Clipboard Image x 2.png")
+        XCTAssertEqual(try Data(contentsOf: first), Data([1]), "the first drop's file is still being uploaded maybe")
+    }
+
+    func testThePromiseFallbackStillWritesWhereItIsDropped() throws {
+        let png = pngData()
+        let provider = ClipboardImagePromiseProvider(pngData: png, fileName: "Clipboard Image y.png")
         let probe = NSPasteboard(name: NSPasteboard.Name("io.github.amidamaru940.skerry.tests.\(UUID().uuidString)"))
         defer { probe.releaseGlobally() }
         XCTAssertTrue(provider.writableTypes(for: probe).contains(.png))
-        XCTAssertEqual(provider.pasteboardPropertyList(forType: .png) as? Data, png, "the picture itself, not its preview text")
+        XCTAssertEqual(provider.pasteboardPropertyList(forType: .png) as? Data, png)
 
-        // Dropping in a folder writes the file there, and only there.
         let destination = FileManager.default.temporaryDirectory.appendingPathComponent("amg-drop-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: destination) }
@@ -363,9 +394,6 @@ final class ClipboardDragTests: XCTestCase {
         }
         wait(for: [written], timeout: 2)
         XCTAssertEqual(try Data(contentsOf: target), png)
-        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: destination.path).count, 1)
-
-        XCTAssertEqual(legacyCopies(), before, "no temporary copies of clipboard pictures")
     }
 
     func testTextAndFilesDragAsThemselves() throws {
@@ -388,5 +416,177 @@ final class ClipboardDragTests: XCTestCase {
         ClipboardTemporaryFiles.removeLegacyDragCopies(in: folder)
 
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: folder.path), ["unrelated.png"])
+    }
+}
+
+// MARK: - Buffer v3: «Отменить» instead of a question (Q26)
+
+extension ClipboardTabManagerTests {
+    func testARemovedRowComesBackWhereItWas() {
+        let a = ClipboardItem(stringData: "a", type: .text)
+        let b = ClipboardItem(stringData: "b", type: .text)
+        let c = ClipboardItem(stringData: "c", type: .text)
+        manager.clipboardHistory = [a, b, c]
+
+        let removal = manager.remove(b)
+        XCTAssertEqual(manager.clipboardHistory.map(\.id), [a.id, c.id])
+        XCTAssertEqual(removal.count, 1)
+
+        manager.restore(removal)
+        XCTAssertEqual(manager.clipboardHistory.map(\.id), [a.id, b.id, c.id], "back at its place, same entry")
+    }
+
+    func testAPinnedRowGoesWholeAndComesBackPinned() {
+        let pinned = ClipboardItem(stringData: "keep", type: .text)
+        let other = ClipboardItem(stringData: "other", type: .text)
+        manager.clipboardHistory = [other]
+        manager.pinnedItems = [pinned]
+
+        let removal = manager.remove(pinned)
+        XCTAssertTrue(manager.pinnedItems.isEmpty)
+        XCTAssertEqual(manager.clipboardHistory.map(\.id), [other.id], "not dropped into the history on the way out")
+
+        manager.restore(removal)
+        XCTAssertEqual(manager.pinnedItems.map(\.id), [pinned.id])
+        XCTAssertEqual(manager.clipboardHistory.map(\.id), [other.id])
+    }
+
+    func testClearingKeepsThePinnedAndUndoBringsTheHistoryBack() {
+        let items = (0..<4).map { ClipboardItem(stringData: "item \($0)", type: .text) }
+        let pinned = ClipboardItem(stringData: "pinned", type: .text)
+        manager.clipboardHistory = items
+        manager.pinnedItems = [pinned]
+
+        let removal = manager.removeHistory()
+        XCTAssertTrue(manager.clipboardHistory.isEmpty)
+        XCTAssertEqual(manager.pinnedItems.map(\.id), [pinned.id], "pinned entries stay")
+        XCTAssertEqual(removal.count, 4)
+
+        manager.restore(removal)
+        XCTAssertEqual(manager.clipboardHistory.map(\.id), items.map(\.id))
+    }
+
+    /// The trash takes what the filter shows: «Ссылки» the links alone,
+    /// «Все» the copies and the screenshots, and «Отменить» puts all of it
+    /// back. «Очистить историю» left the screenshots, so with only those in
+    /// «Буфер» it seemed to do nothing (23.10).
+    func testTheTrashTakesWhatTheFilterShowsAndUndoPutsItBack() {
+        let text = ClipboardItem(stringData: "note", type: .text)
+        let link = ClipboardItem(stringData: "https://example.org", type: .url)
+        manager.clipboardHistory = [text, link]
+        let store = ScreenshotBatchStore(fileURL: nil, batchGap: { 900 })
+        store.add(URL(fileURLWithPath: "/tmp/skerry-tests/a.png"), capturedAt: Date(timeIntervalSince1970: 100))
+        store.add(URL(fileURLWithPath: "/tmp/skerry-tests/b.png"), capturedAt: Date(timeIntervalSince1970: 200))
+        let shots = ScreenshotShelfManager(store: store)
+        let state = BufferTabState()
+
+        XCTAssertEqual(BufferTabState.clearableCount(.links, history: manager.clipboardHistory, shownShots: shots.shownItemIDs.count), 1)
+        XCTAssertEqual(BufferTabState.clearableCount(.screenshots, history: manager.clipboardHistory, shownShots: shots.shownItemIDs.count), 2)
+        XCTAssertEqual(BufferTabState.clearableCount(.all, history: manager.clipboardHistory, shownShots: shots.shownItemIDs.count), 4)
+
+        state.clear(.links, manager: manager, shots: shots)
+        XCTAssertEqual(manager.clipboardHistory.map(\.id), [text.id], "only the links")
+        XCTAssertEqual(store.allItems.count, 2, "«Ссылки» leaves the screenshots")
+        state.undoRemoval(manager: manager, shots: shots)
+        XCTAssertEqual(manager.clipboardHistory.map(\.id), [text.id, link.id])
+
+        state.clear(.all, manager: manager, shots: shots)
+        XCTAssertTrue(manager.clipboardHistory.isEmpty)
+        XCTAssertTrue(store.isEmpty)
+        XCTAssertEqual(state.undo?.count, 4)
+        XCTAssertEqual(BufferUndo.clearedMessage(4), String(format: String(localized: "Cleared · %lld"), 4))
+
+        state.undoRemoval(manager: manager, shots: shots)
+        XCTAssertEqual(manager.clipboardHistory.map(\.id), [text.id, link.id])
+        XCTAssertEqual(store.allItems.map(\.path), ["/tmp/skerry-tests/a.png", "/tmp/skerry-tests/b.png"])
+        XCTAssertEqual(store.batches.count, 1, "back in their own batch")
+    }
+
+    /// A screenshot taken during the offer stays; the cleared ones come back
+    /// beside it, never twice.
+    func testUndoKeepsAScreenshotTakenMeanwhile() {
+        let store = ScreenshotBatchStore(fileURL: nil, batchGap: { 900 })
+        store.add(URL(fileURLWithPath: "/tmp/skerry-tests/a.png"), capturedAt: Date(timeIntervalSince1970: 100))
+        let removal = store.takeOut(Set(store.allItems.map(\.id)))
+        XCTAssertTrue(store.isEmpty)
+        store.add(URL(fileURLWithPath: "/tmp/skerry-tests/new.png"), capturedAt: Date(timeIntervalSince1970: 300))
+        store.restore(removal)
+        store.restore(removal)
+        XCTAssertEqual(store.batches.map { $0.items.map(\.path) }, [["/tmp/skerry-tests/new.png"], ["/tmp/skerry-tests/a.png"]],
+                       "the new screenshot stays on top, the cleared batch comes back under it")
+        XCTAssertEqual(store.currentBatch?.items.map(\.path), ["/tmp/skerry-tests/new.png"])
+    }
+
+    func testUndoDoesNotDoubleAnEntryCopiedAgain() {
+        let a = ClipboardItem(stringData: "same", type: .text)
+        manager.clipboardHistory = [a]
+        let removal = manager.remove(a)
+        // Copied again while «Отменить» was offered.
+        let again = ClipboardItem(stringData: "same", type: .text)
+        manager.clipboardHistory = [again]
+
+        manager.restore(removal)
+        XCTAssertEqual(manager.clipboardHistory.map(\.id), [again.id])
+    }
+
+    func testAPictureHeldOnlyInMemorySurvivesTheUndo() throws {
+        // Persistence is off here: the picture lives in memory, and leaving
+        // the lists would prune it.
+        let picture = ClipboardItem(imageData: Data([0x89, 0x50, 0x4E, 0x47]))
+        XCTAssertNil(picture.imageFileName)
+        manager.clipboardHistory = [picture]
+
+        let removal = manager.remove(picture)
+        XCTAssertNil(ClipboardItem.inMemoryImage(for: picture.id), "pruned with the entry")
+        manager.restore(removal)
+        XCTAssertEqual(try XCTUnwrap(manager.clipboardHistory.first).getImageData(), Data([0x89, 0x50, 0x4E, 0x47]))
+    }
+
+    func testFinishingARemovalDeletesItsPictureFile() throws {
+        let name = "clipboard_image_test.png"
+        let url = directory.appendingPathComponent(name)
+        try Data([1, 2, 3]).write(to: url)
+        var picture = ClipboardItem(imageData: Data([1, 2, 3]))
+        picture.imageFileName = name
+        manager.clipboardHistory = [picture]
+
+        let removal = manager.remove(picture)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: url.path), "kept while «Отменить» is offered")
+        manager.finishRemoval(removal)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
+    }
+
+    func testTheTabOffersUndoForARowAndForTheWholeHistory() {
+        let state = BufferTabState.shared
+        defer { state.finishUndo(manager: manager) }
+        let a = ClipboardItem(stringData: "a", type: .text)
+        let b = ClipboardItem(stringData: "b", type: .text)
+        manager.clipboardHistory = [a, b]
+
+        state.delete(b, shownAt: 1, pinned: false, manager: manager)
+        XCTAssertEqual(state.undo?.kind, .row(itemID: b.id, index: 1, pinned: false))
+        XCTAssertEqual(manager.clipboardHistory.map(\.id), [a.id])
+        // The row keeps its place (and number) while «Отменить» shows.
+        let rows = ClipboardRowEntry.rows(manager.clipboardHistory, undo: state.undo?.kind, pinnedSection: false)
+        XCTAssertEqual(rows, [.item(a), .removed(b.id)])
+        XCTAssertEqual(ClipboardRowEntry.rows(manager.clipboardHistory, undo: state.undo?.kind, pinnedSection: true), [.item(a)],
+                       "only in its own section")
+
+        state.undoRemoval(manager: manager)
+        XCTAssertNil(state.undo)
+        XCTAssertEqual(manager.clipboardHistory.map(\.id), [a.id, b.id])
+
+        state.clear(.all, manager: manager, shots: ScreenshotShelfManager(store: ScreenshotBatchStore(fileURL: nil, batchGap: { 900 })))
+        XCTAssertEqual(state.undo?.kind, .history)
+        XCTAssertEqual(state.undo?.removal.count, 2)
+        XCTAssertTrue(manager.clipboardHistory.isEmpty)
+
+        // A second removal ends the first offer for good.
+        manager.clipboardHistory = [a]
+        state.delete(a, shownAt: 0, pinned: false, manager: manager)
+        XCTAssertEqual(state.undo?.kind, .row(itemID: a.id, index: 0, pinned: false))
+        state.undoRemoval(manager: manager)
+        XCTAssertEqual(manager.clipboardHistory.map(\.id), [a.id], "only the last removal comes back")
+        XCTAssertEqual(BufferTabState.undoLifetime, 5)
     }
 }

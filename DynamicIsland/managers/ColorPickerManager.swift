@@ -165,8 +165,10 @@ class ColorPickerManager: ObservableObject {
     }
     
     /// Colours have their own history here; marked as the app's own write,
-    /// they stay out of the clipboard history.
+    /// they stay out of the clipboard history. A screenshot paste or copy
+    /// under way stops first, so it does not overwrite the colour.
     func copyToClipboard(_ text: String, to pasteboard: NSPasteboard = .general) {
+        ClipboardPaster.yieldClipboardFromAnyThread()
         ClipboardOwnWrites.write(to: pasteboard) { pasteboard in
             pasteboard.setString(text, forType: .string)
         }

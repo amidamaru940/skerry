@@ -99,3 +99,36 @@ enum SettingsSectionLayout: String, CaseIterable, Identifiable {
         return [text, localized].contains { $0.range(of: trimmed, options: [.caseInsensitive, .diacriticInsensitive]) != nil }
     }
 }
+
+/// Rows that concept E (docs/design/VISUAL-E.md) left without effect: the
+/// island is black and its only colour is the light from the content, so some
+/// appearance switches no longer change anything on it. The owner's decision
+/// of 22.10.2026: hide those rows. Their keys, stored values and code paths
+/// stay; a row that still changes something visible stays where it applies.
+enum SettingsRowVisibility {
+    /// «Enable blur effect behind album art» (`lightingEffect`): no view reads
+    /// the key any more; E's cover glow is the language, not an option.
+    static let showsArtworkLighting = false
+
+    /// «Progressbar style», «Show percentages beside progress bars» and
+    /// «Color-coded volume display» (`progressBarStyle`,
+    /// `showProgressPercentages`, `useColorCodedVolumeDisplay`). Under the
+    /// Inline HUD style volume, brightness and backlight are E's level line,
+    /// which ignores all three; the Default style still draws its bars with them.
+    static func showsProgressBarRows(inlineHUD: Bool) -> Bool {
+        !inlineHUD
+    }
+
+    /// Search titles of the rows above, so search never offers a hidden row.
+    static let artworkLightingTitles: Set<String> = ["Enable blur effect behind album art"]
+    static let progressBarTitles: Set<String> = [
+        "Progressbar style", "Show percentages beside progress bars", "Color-coded volume display",
+    ]
+
+    /// Whether search may offer the row with this title.
+    static func isSearchable(_ title: String, inlineHUD: Bool) -> Bool {
+        if artworkLightingTitles.contains(title) { return showsArtworkLighting }
+        if progressBarTitles.contains(title) { return showsProgressBarRows(inlineHUD: inlineHUD) }
+        return true
+    }
+}

@@ -96,14 +96,35 @@ struct RecordingLiveActivity: View {
         max(0, vm.effectiveClosedNotchHeight - 12)
     }
 
+    /// Equal wings (E §2.1) inside the HUD's width: the island is centred on
+    /// the camera, and the dot's narrow wing beside the duration's wide one
+    /// slid the duration's wing 46 pt in under the camera. The dot stays
+    /// flush left, the duration flush right.
+    static func closedGeometry(closedNotchWidth: CGFloat, hudWidth: CGFloat, centerWidth: CGFloat, textWidth: CGFloat) -> ClosedWingGeometry {
+        let wing = max(0, (hudWidth - centerWidth) / 2)
+        // The duration shrinks to fit its wing, down to `minimumTextScale`.
+        let drawn = min(textWidth, max(textWidth * minimumTextScale, wing - trailingPadding))
+        return ClosedWingGeometry(
+            leadingWing: wing,
+            middle: centerWidth,
+            trailingWing: wing,
+            leadingContent: 0,
+            trailingContent: drawn + trailingPadding,
+            camera: ClosedWingE.cameraWidth(closedNotchWidth: closedNotchWidth)
+        )
+    }
+
+    static let minimumTextScale: CGFloat = 0.72
+    static let trailingPadding: CGFloat = 10
+
     private var leadingWidth: CGFloat {
         guard isVisible else { return 0 }
-        return max(0, vm.effectiveClosedNotchHeight - 12 + gestureProgress / 2)
+        return max(0, (hudWidth - centerWidth) / 2)
     }
 
     private var trailingWidth: CGFloat {
         guard isVisible else { return 0 }
-        return max(0, hudWidth - centerWidth - leadingWidth)
+        return max(0, (hudWidth - centerWidth) / 2)
     }
 
     private var inlineStopButtonSize: CGFloat {
@@ -137,7 +158,7 @@ struct RecordingLiveActivity: View {
                 .monospacedDigit()
                 .foregroundStyle(.red)
                 .lineLimit(1)
-                .minimumScaleFactor(0.72)
+                .minimumScaleFactor(Self.minimumTextScale)
                 .contentTransition(.numericText())
 
             if presentation == .inline {
@@ -145,7 +166,7 @@ struct RecordingLiveActivity: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
-        .padding(.trailing, 10)
+        .padding(.trailing, Self.trailingPadding)
         .opacity(isVisible ? 1 : 0)
     }
 

@@ -67,8 +67,20 @@ final class PerAppVolumeManager: ObservableObject {
     private var pollInterval: TimeInterval?
     private var trackers = 0
     private var featureCancellable: AnyCancellable?
+    private var gateCancellable: AnyCancellable?
 
     private init() {
+        // No reconciliation while nobody is at the Mac; one on return.
+        gateCancellable = ActivityGate.shared.publisher(for: .userPresent)
+            .dropFirst()
+            .sink { [weak self] present in
+                Task { @MainActor in
+                    guard let self else { return }
+                    if present { self.refreshApps() }
+                    self.rescheduleReconciliation()
+                }
+            }
+
         featureCancellable = Defaults.publisher(.enablePerAppVolume, options: [])
             .sink { [weak self] change in
                 Task { @MainActor in
@@ -181,7 +193,9 @@ final class PerAppVolumeManager: ObservableObject {
     private func rescheduleReconciliation() {
         // A visible list should feel live; keeping existing taps bound to
         // their apps does not need anything like that rate.
-        let interval: TimeInterval? = trackers > 0 ? 1.5 : (taps.isEmpty ? nil : 5)
+        let interval: TimeInterval? = !ActivityGate.shared.allows(.userPresent)
+            ? nil
+            : (trackers > 0 ? 1.5 : (taps.isEmpty ? nil : 5))
         // Called from `syncTaps`, so on every refresh -- leave a timer that is
         // already running at the right rate alone rather than restarting it.
         guard interval != pollInterval else { return }
@@ -194,6 +208,7 @@ final class PerAppVolumeManager: ObservableObject {
         pollTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refreshApps() }
         }
+        pollTimer?.tolerance = interval / 4
     }
 
     // MARK: - App list

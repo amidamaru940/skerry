@@ -58,6 +58,20 @@ struct ContentView: View {
     /// compared against the frontmost app's menus. Only the *size* is read --
     /// the offset that follows does not change it, so there is no feedback.
     @State private var closedContentWidth: CGFloat = 0
+    /// The closed content's width when not hovered: menu clearance is worked
+    /// out from it, so hovering cannot move the island under the pointer.
+    @State private var restingClosedContentWidth: CGFloat = 0
+    /// The island window's width, as SwiftUI lays it out (it re-evaluates on
+    /// every resize, which an NSWindow frame read would not).
+    @State private var islandHostWidth: CGFloat = 0
+    /// Opened from the closed island on a screen with a notch: where that
+    /// island was, as its hit area (`closedNotchHitArea`, wings included,
+    /// at the menu-clearance shift it was drawn with). Open, a pointer still
+    /// resting there is beside the neck yet on the island it opened, so that
+    /// rect counts as the island; it is dropped once the pointer leaves it or
+    /// goes down into the panel, after which the menu bar beside the neck is
+    /// the menus' again. nil otherwise.
+    @State private var openBandFootprint: CGRect?
     @ObservedObject var capsLockManager = CapsLockManager.shared
     @ObservedObject var screenshotManager = ScreenshotShelfManager.shared
     @ObservedObject var extensionLiveActivityManager = ExtensionLiveActivityManager.shared
@@ -67,7 +81,11 @@ struct ContentView: View {
     @ObservedObject var shelfState = ShelfStateViewModel.shared
     @ObservedObject private var shelfFlash = ShelfFlashModel.shared
     @ObservedObject private var colorFlash = ColorPickFlash.shared
-    @ObservedObject private var caffeinate = CaffeinateManager.shared
+    /// Only whether Keep Awake is on: observing the manager re-drew this
+    /// whole view every second of a timed session (its countdown).
+    @State private var keepAwakeActive = CaffeinateManager.shared.isActive
+    /// Sleep, screen off and lock stop the pointer watch (rarely changes).
+    @ObservedObject private var activityGate = ActivityGate.shared
     
     @Default(.enableStatsFeature) var enableStatsFeature
     @Default(.showCpuGraph) var showCpuGraph
@@ -179,7 +197,7 @@ struct ContentView: View {
                 
                 switch (kind, style) {
                 case (.charging, _), (.lowBattery, .compact), (.fullBattery, .compact):
-                    width += 180
+                    width += 2 * BatteryTemporaryActivityView.compactWing(for: kind, batteryLevel: displayedBatteryHUDLevel)
                 case (.lowBattery, .standard):
                     width += 100
                     height += 75
@@ -251,10 +269,10 @@ struct ContentView: View {
     @State private var lastHapticTime: Date = Date()
     @State private var hoverClickMonitor: Any?
     @State private var hoverClickLocalMonitor: Any?
-    /// Pointer-move monitors that open the closed island from its ears.
-    @State private var earHoverMonitors: [Any] = []
+    /// Pointer-move monitors for "hide until hover", where the island is off screen.
+    @State private var hiddenIslandPointerMonitors: [Any] = []
     /// The pointer is over the drawn island (SwiftUI hover), as opposed to
-    /// only in the ears beside it.
+    /// only in its hit area's strip below it.
     @State private var pointerOverIslandView = false
     @State private var stickyTerminalClickMonitor: Any?
     @State private var hiddenEdgeHoverPollingTask: Task<Void, Never>?
@@ -410,14 +428,41 @@ struct ContentView: View {
         notchShadowPaddingStandard
     }
 
+    /// The menu-bar band the open island leaves to the menus on this screen
+    /// (`OpenIslandNeck`); 0 on a screen without a notch.
+    private var neckBandHeight: CGFloat {
+        OpenIslandNeck.bandHeight(forScreenNamed: currentScreenName)
+    }
+
+    /// How far the open layout starts below the screen edge: the band,
+    /// where only the neck is drawn. 0 while closed.
+    private var openNeckBand: CGFloat {
+        vm.notchState == .open ? neckBandHeight : 0
+    }
+
     private var currentNotchShape: NotchShape {
+        currentNotchShape(neckTopInset: 0)
+    }
+
+    /// `neckTopInset`: how far the shape's rect starts above the screen edge
+    /// (the hit shape spans the window's top bleed too).
+    private func currentNotchShape(neckTopInset: CGFloat) -> NotchShape {
         let topRadius = (vm.notchState == .open && Defaults[.cornerRadiusScaling])
             ? activeCornerRadiusInsets.opened.top
             : activeCornerRadiusInsets.closed.top
         let bottomRadius = (vm.notchState == .open && Defaults[.cornerRadiusScaling])
             ? activeCornerRadiusInsets.opened.bottom
             : activeCornerRadiusInsets.closed.bottom
-        return NotchShape(topCornerRadius: topRadius, bottomCornerRadius: bottomRadius)
+        return NotchShape(
+            topCornerRadius: topRadius,
+            bottomCornerRadius: bottomRadius,
+            neck: OpenIslandNeck.neck(
+                closedNotchWidth: vm.closedNotchSize.width,
+                bandHeight: neckBandHeight,
+                isOpen: vm.notchState == .open,
+                topInset: neckTopInset
+            )
+        )
     }
 
     /// Whether the current screen should render as a Dynamic Island pill
@@ -627,6 +672,17 @@ struct ContentView: View {
     /// Resolves the clip/content shape per-screen: pill on non-notch screens
     /// when dynamic island mode is active, standard notch shape otherwise.
     private var resolvedClipShape: AnyShape {
+        resolvedClipShape(neckTopInset: 0)
+    }
+
+    /// The hover and hit shape. It is laid over the window's top bleed as
+    /// well, so the open neck's band is measured from there: the panel takes
+    /// the pointer only below the menu bar, as it is drawn.
+    private var resolvedHitShape: AnyShape {
+        resolvedClipShape(neckTopInset: isIslandMode ? 0 : notchTopScreenBleedAmount)
+    }
+
+    private func resolvedClipShape(neckTopInset: CGFloat) -> AnyShape {
         if isConnectivityHUDVisible {
             if isDynamicIslandMode {
                 let radius: CGFloat = networkConnectivityManager.hudState == .noConnection ? 40 : 24
@@ -649,16 +705,68 @@ struct ContentView: View {
         if isDynamicIslandMode {
             return AnyShape(currentPillShape)
         }
-        return AnyShape(currentNotchShape)
+        return AnyShape(currentNotchShape(neckTopInset: neckTopInset))
     }
 
     var body: some View {
         installRootLifecycleHandlers(on: rootBodyView)
     }
 
+    /// How far past the island's frame the menu-bar mask lets the open
+    /// shadow through (sides and bottom; the shadow's radius is 10).
+    private static let shadowMaskOverhang: CGFloat = 60
+
+    /// The anti-gap fill above the screen edge: the island's width, or open
+    /// on a screen with a notch the neck's (the closed island at rest), so
+    /// nothing of the island lies over the menu bar beside the neck.
+    private var topBleedFillWidth: CGFloat? {
+        openNeckBand > 0
+            ? OpenIslandNeck.outerWidth(closedNotchWidth: vm.closedNotchSize.width)
+            : nil
+    }
+
+    /// The open island's shadow, on a layer of its own behind the island, so
+    /// that only the shadow is masked and only while open. Beside the neck
+    /// it must not reach the menu bar: the titles there stay as they are and
+    /// get their clicks (a pixel that is not fully transparent keeps the
+    /// click). The mask passes it below the menu bar only (all of it without
+    /// a notch) and cuts the island's own shape out of this layer, so it
+    /// adds only the shadow: the island draws itself over it, as when the
+    /// shadow was cast by the island. Closed it is fully transparent, which
+    /// SwiftUI does not draw: no shadow and no mask pass, also while the
+    /// closed island animates (the music visualiser); open, it is cast by a
+    /// still shape, not by the panel's changing content.
+    private var openIslandShadow: some View {
+        let topInset = isIslandMode ? 0 : notchTopScreenBleedAmount
+        return resolvedClipShape
+            .fill(.black)
+            .padding(.top, topInset)
+            .shadow(color: .black.opacity(0.6), radius: Defaults[.cornerRadiusScaling] ? 10 : 5)
+            .mask(alignment: .top) {
+                ZStack(alignment: .top) {
+                    Rectangle()
+                        .padding(.top, neckBandHeight > 0
+                            ? topInset + neckBandHeight
+                            : -Self.shadowMaskOverhang)
+                        .padding([.horizontal, .bottom], -Self.shadowMaskOverhang)
+                    resolvedClipShape
+                        .padding(.top, topInset)
+                        .blendMode(.destinationOut)
+                }
+                .compositingGroup()
+            }
+            // E: no shadow on the closed island in any state, hover included.
+            .opacity(vm.notchState == .open && Defaults[.enableShadow] ? 1 : 0)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+    }
+
     private var mainLayoutBase: some View {
         NotchLayout()
             .frame(alignment: .top)
+            // Open on a screen with a notch, the layout starts below the menu
+            // bar; in the band above it the shape keeps only the neck.
+            .padding(.top, openNeckBand)
             // Connectivity HUD metrics already describe the complete surface.
             // Applying the regular closed-notch inset here makes that surface
             // wider than both the root view and its NSWindow, clipping both sides.
@@ -674,16 +782,11 @@ struct ContentView: View {
                 if !isIslandMode {
                     Rectangle()
                         .fill(.black)
-                        .frame(height: notchTopScreenBleedAmount)
+                        .frame(width: topBleedFillWidth, height: notchTopScreenBleedAmount)
                 }
             }
             .compositingGroup()
-            .shadow(
-                color: ((vm.notchState == .open || isHovering) && Defaults[.enableShadow])
-                    ? .black.opacity(0.6)
-                    : .clear,
-                radius: Defaults[.cornerRadiusScaling] ? 10 : 5
-            )
+            .background(alignment: .top) { openIslandShadow }
             // Extra horizontal inset for Dynamic Island mode so the shadow
             // is not clipped by the outer frame constraint
             .padding(.horizontal, isIslandMode ? dynamicIslandShadowInset : 0)
@@ -715,7 +818,7 @@ struct ContentView: View {
             }
             .conditionalModifier(interactionsEnabled) { view in
                 view
-                    .contentShape(resolvedClipShape)
+                    .contentShape(resolvedHitShape)
                     .onHover { hovering in
                         pointerOverIslandView = hovering
                         handleHover(hovering)
@@ -795,6 +898,7 @@ struct ContentView: View {
                     isHoveringClosedMusicWaveformControl = false
                 }
                 if newState == .closed {
+                    openBandFootprint = nil
                     removeStickyTerminalClickMonitor()
                 } else {
                     // Install the outside-click monitor for terminal opens that don't
@@ -818,9 +922,18 @@ struct ContentView: View {
                 }
             }
             .onChange(of: vm.shouldRecheckHover) { _, _ in
-                // Recheck hover state when popovers are closed
+                // After a popover closes or a drag out ends. Where the pointer
+                // is now decides: hover events did not arrive during the drag,
+                // so `isHovering` may still say what it said before it.
                 runAfter(0.1) {
-                    if vm.notchState == .open && !shouldPreventAutoClose() && !isHovering {
+                    guard vm.notchState == .open, !shouldPreventAutoClose() else { return }
+                    if isPointInsideNotchWindow() {
+                        if !isHovering {
+                            isHovering = true
+                            startHiddenEdgeHoverPolling()
+                        }
+                    } else {
+                        isHovering = false
                         vm.close()
                     }
                 }
@@ -876,11 +989,18 @@ struct ContentView: View {
         }
         .frame(
             maxWidth: (dynamicNotchSize.width + (vm.notchState == .open ? 24 : 0) + (isDynamicIslandMode ? dynamicIslandShadowInset * 2 : 0)).rounded(),
-            maxHeight: (dynamicNotchSize.height + (vm.notchState == .open ? 12 : 0) + (isIslandMode ? 0 : notchTopScreenBleedAmount) + (isDynamicIslandMode ? dynamicIslandTopOffset + dynamicIslandShadowInset * 2 : currentShadowPadding)).rounded(),
+            maxHeight: (dynamicNotchSize.height + (vm.notchState == .open ? 12 : 0) + openNeckBand + (isIslandMode ? 0 : notchTopScreenBleedAmount) + (isDynamicIslandMode ? dynamicIslandTopOffset + dynamicIslandShadowInset * 2 : currentShadowPadding)).rounded(),
             alignment: .top
         )
         .animation(nil, value: vm.notchState)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .background {
+            GeometryReader { geo in
+                Color.clear
+                    .onAppear { islandHostWidth = geo.size.width }
+                    .onChange(of: geo.size.width) { _, width in islandHostWidth = width }
+            }
+        }
         .environmentObject(privacyManager)
         .background(dragDetector)
         .environmentObject(vm)
@@ -906,8 +1026,7 @@ struct ContentView: View {
                     clearMusicControlVisibilityDeadline()
                 }
                 enqueueMusicControlWindowSync(forceRefresh: true)
-                startHiddenEdgeHoverPolling()
-                startEarHoverMonitor()
+                syncHiddenIslandPointerMonitor()
                 // Deterministic teardown for borderless panels (`.onDisappear` is
                 // unreliable); the window-cleanup path calls this before closing.
                 vm.onViewTeardown = { performViewTeardown() }
@@ -915,8 +1034,20 @@ struct ContentView: View {
             .onChange(of: terminalStickyMode) { _, _ in
                 syncStickyTerminalOutsideClickMonitor()
             }
+            .onChange(of: activityGate.state.userPresent) { _, _ in
+                syncHiddenIslandPointerMonitor()
+            }
+            .onReceive(CaffeinateManager.shared.$isActive.removeDuplicates()) { active in
+                keepAwakeActive = active
+            }
+            .onChange(of: shouldHideUntilHover) { _, _ in
+                syncHiddenIslandPointerMonitor()
+            }
             .onChange(of: vm.notchState) { _, state in
+                syncHiddenIslandPointerMonitor()
                 if state == .open {
+                    // The footprint is looked at on events, this among them.
+                    MemoryUsageMonitor.shared.checkNow()
                     suppressMusicControlWindowUpdates()
                     cancelMusicControlWindowSync()
                     hideMusicControlWindow()
@@ -1050,17 +1181,27 @@ struct ContentView: View {
     private var menuBarClearanceOffset: CGFloat {
         guard vm.notchState == .closed,
               !vm.hideOnClosed,
-              closedContentWidth > 0,
-              let menusRightEdge = menuBarLayout.appMenusRightEdge,
+              restingClosedContentWidth > 0,
+              islandHostWidth > 0,
+              let measurement = menuBarLayout.measurement,
               let screenFrame = getScreenFrame(currentScreenName)
         else { return 0 }
-
+        // This screen's menu bar, in the top-left coordinates the measurement uses.
+        let top = (NSScreen.screens.first?.frame.maxY ?? screenFrame.maxY) - screenFrame.maxY
         return MenuBarLayout.clearanceOffset(
-            // The black surface is what covers the menus, and it is wider
-            // than the content by the closed padding on either side.
-            contentWidth: MenuBarLayout.surfaceWidth(contentWidth: closedContentWidth, padding: notchHorizontalPadding),
+            // The black surface is what covers the menus: the content plus the
+            // closed padding on either side, at its hovered size.
+            contentWidth: MenuBarLayout.surfaceWidth(
+                contentWidth: restingClosedContentWidth + MenuBarLayout.hoverGrowthAllowance,
+                padding: notchHorizontalPadding
+            ),
             screenFrame: screenFrame,
-            menusRightEdge: menusRightEdge,
+            measurement: measurement,
+            menuBarBand: top...(top + 40),
+            hasNotch: !isNonNotchScreen,
+            // The window is centred on the screen; content shifted past its
+            // edge is clipped to a hard black edge.
+            maxRightEdge: screenFrame.midX + islandHostWidth / 2,
             gap: MenuBarLayout.clearanceGap
         )
     }
@@ -1266,8 +1407,14 @@ struct ContentView: View {
               .background {
                   GeometryReader { geo in
                       Color.clear
-                          .onAppear { closedContentWidth = geo.size.width }
-                          .onChange(of: geo.size.width) { _, width in closedContentWidth = width }
+                          .onAppear {
+                              closedContentWidth = geo.size.width
+                              if !isHovering { restingClosedContentWidth = geo.size.width }
+                          }
+                          .onChange(of: geo.size.width) { _, width in
+                              closedContentWidth = width
+                              if !isHovering { restingClosedContentWidth = width }
+                          }
                   }
               }
               .pinnedLyrics(isVisible: pinnedLyricsVisible,
@@ -1378,7 +1525,7 @@ struct ContentView: View {
                 Rectangle()
                     .fill(.black)
                     .frame(width: vm.closedNotchSize.width - 20)
-                IdleAnimationView()
+                IdleAnimationView(isHovering: isHovering)
                     .frame(width: sideSize, height: sideSize)
             }
         }.frame(height: vm.effectiveClosedNotchHeight + (isHovering ? 8 : 0), alignment: .center)
@@ -1428,10 +1575,12 @@ struct ContentView: View {
                         Color.clear
                             .frame(width: artworkSize, height: artworkSize)
                             .background(
-                                Image(nsImage: musicManager.albumArt)
-                                    .resizable()
-                                    .aspectRatio(contentMode: .fit)
-                                    .clipShape(RoundedRectangle(cornerRadius: musicManager.albumArt.size.width/musicManager.albumArt.size.height > 1.0 ? MusicPlayerImageSizes.cornerRadiusInset.closed/3.0 : MusicPlayerImageSizes.cornerRadiusInset.closed))
+                                ClosedMusicArt(
+                                    art: musicManager.albumArt,
+                                    hasArt: closedMusicHasArt,
+                                    isPlaying: musicManager.isPlaying,
+                                    side: artworkSize
+                                )
                             )
                             .clipped()
                             .matchedGeometryEffect(id: "albumArt", in: albumArtNamespace)
@@ -1450,7 +1599,11 @@ struct ContentView: View {
                         .frame(width: artworkSize, height: artworkSize)
                 }
             }
-            .frame(width: wingBaseWidth, height: notchContentHeight, alignment: .center)
+            // 8 from the wall, 6 clear of the camera (E §2.1), also while
+            // hover or a pull widens the wing. A layout shift, not an offset,
+            // so the cover's flight starts where the cover is seen.
+            .frame(width: wingBaseWidth, height: notchContentHeight, alignment: .leading)
+            .padding(.leading, -ClosedWingE.outset)
             .frame(width: leftWingWidth, alignment: .leading)
 
             Rectangle()
@@ -1462,7 +1615,8 @@ struct ContentView: View {
                             MusicTitleMarqueeView(
                                 text: musicManager.songTitle,
                                 isExplicit: musicManager.isCurrentTrackExplicit,
-                                textColor: Defaults[.coloredSpectrogram] ? Color(nsColor: musicManager.avgColor) : Color.gray,
+                                // E: closed text is white; colour lives on the edge only.
+                                textColor: DSE.Palette.text,
                                 minDuration: 0.4,
                                 frameWidth: max(0, (effectiveCenterWidth - vm.closedNotchSize.width) / 2 - 12),
                                 badgeHeight: 13
@@ -1473,7 +1627,7 @@ struct ContentView: View {
                             Text(musicManager.artistName)
                                 .lineLimit(1)
                                 .truncationMode(.tail)
-                                .foregroundStyle(Defaults[.coloredSpectrogram] ? Color(nsColor: musicManager.avgColor) : Color.gray)
+                                .foregroundStyle(DSE.Palette.textSecondary)
                                 .padding(.trailing, 8)
                                 .opacity((coordinator.expandingView.show && coordinator.expandingView.type == .music && Defaults[.enableSneakPeek] && Defaults[.sneakPeekStyles] == .inline) ? 1 : 0)
                         } else if(coordinator.expandingView.show && coordinator.expandingView.type == .timer) {
@@ -1495,7 +1649,7 @@ struct ContentView: View {
                         } else if Defaults[.showSongMetadataInClosedNotch] && isNonNotchScreen && !musicManager.songTitle.isEmpty {
                             MarqueeText(
                                 .constant("\(musicManager.songTitle) • \(musicManager.artistName)"),
-                                textColor: Defaults[.coloredSpectrogram] ? Color(nsColor: musicManager.avgColor) : Color.gray,
+                                textColor: DSE.Palette.text,
                                 minDuration: 3,
                                 frameWidth: max(0, effectiveCenterWidth - 16)
                             )
@@ -1524,7 +1678,22 @@ struct ContentView: View {
         }
         .frame(width: notchWidth, height: notchContentHeight)
         .frame(height: outerHeight, alignment: .center)
+        // The cover's light on the bottom edge of both wings (E L1 + L2).
+        .background(alignment: .bottom) {
+            ClosedMusicLight(
+                art: musicManager.albumArt,
+                hasArt: closedMusicHasArt,
+                isPlaying: musicManager.isPlaying,
+                closedNotchWidth: vm.closedNotchSize.width
+            )
+        }
         .animation(.smooth(duration: 0.25), value: secondary?.id)
+    }
+
+    /// False while the player has no cover: the launch stand-in, or the
+    /// source's app icon in its place (the open player asks the same).
+    private var closedMusicHasArt: Bool {
+        musicManager.showsRealArtwork
     }
 
     private func resolveMusicSecondaryLiveActivity(isMusicPairingEligible: Bool = true) -> MusicSecondaryLiveActivity? {
@@ -1561,7 +1730,7 @@ struct ContentView: View {
             guard let flash = shelfFlash.flash, !lockScreenManager.isLocked else { return nil }
             return .shelf(count: flash.added)
         case .keepAwake:
-            return enableCaffeinate && caffeinate.isActive && !lockScreenManager.isLocked ? .keepAwake : nil
+            return enableCaffeinate && keepAwakeActive && !lockScreenManager.isLocked ? .keepAwake : nil
         case .screenshot, .colorPicked, .music, .download, .localSend, .privacy:
             return nil
         }
@@ -1594,7 +1763,7 @@ struct ContentView: View {
             && (Defaults[.enableCameraDetection] || Defaults[.enableMicrophoneDetection]) { active.insert(.privacy) }
         if extensionStandalonePayload != nil { active.insert(.extensionActivity) }
         if shown && !locked && !coordinator.expandingView.show && shelfFlash.flash != nil { active.insert(.shelf) }
-        if shown && !locked && !coordinator.expandingView.show && enableCaffeinate && caffeinate.isActive { active.insert(.keepAwake) }
+        if shown && !locked && !coordinator.expandingView.show && enableCaffeinate && keepAwakeActive { active.insert(.keepAwake) }
         return active
     }
 
@@ -1609,7 +1778,7 @@ struct ContentView: View {
         case .screenshot:
             if let flash = screenshotManager.flash {
                 // New screenshot: thumbnail and batch count for a moment.
-                ScreenshotFlashLiveActivity(flash: flash)
+                ClosedScreenshotFlash(flash: flash)
                     .transition(.opacity.animation(.smooth(duration: 0.25)))
             }
         case .colorPicked:
@@ -1902,7 +2071,8 @@ struct ContentView: View {
                 .constant(closedMusicTitleText),
                 font: .callout,
                 nsFont: .callout,
-                textColor: Defaults[.coloredSpectrogram] ? Color(nsColor: musicManager.avgColor) : Color.gray,
+                // E: closed text is white; colour lives only on the edge.
+                textColor: DSE.Palette.text,
                 minDuration: 3,
                 frameWidth: max(0, trailingWidth - 12 - trailingInset)
             )
@@ -1925,15 +2095,22 @@ struct ContentView: View {
     ) -> some View {
         let width = CGFloat(Defaults[.visualizerBarCount]) * 4
         if useMusicVisualizer || forceSpectrum {
-            Rectangle()
-                .fill((Defaults[.coloredSpectrogram] ? Color(nsColor: musicManager.avgColor) : Color.gray).spectrogramGradient())
-                // As wide as the bars, like the lock screen and extension
-                // visualizers; a fixed 50 pt ran past the closed wing.
-                .frame(width: width)
-                .mask {
-                    AudioVisualizerView(isPlaying: $musicManager.isPlaying)
-                        .frame(width: width, height: 12)
-                }
+            if Defaults[.enableRealTimeWaveform] {
+                // The live wave the user turned on (it needs the audio tap),
+                // white like E's wave: colour lives only on the edge.
+                Rectangle()
+                    .fill(DSE.Palette.text)
+                    // As wide as the bars, like the lock screen and extension
+                    // visualizers; a fixed 50 pt ran past the closed wing.
+                    .frame(width: width)
+                    .mask {
+                        RealTimeAudioSpectrumView(isPlaying: $musicManager.isPlaying)
+                            .frame(width: width, height: 12)
+                    }
+            } else {
+                // E: the static white wave; nothing ticks while it shows.
+                ClosedMusicWave(isPlaying: musicManager.isPlaying)
+            }
         }
     }
 
@@ -1944,30 +2121,28 @@ struct ContentView: View {
         enableClosedPlayPauseOverlay: Bool = false
     ) -> some View {
         if useMusicVisualizer || forceSpectrum {
+            // E: under the pointer the glyph takes the wave's place; no plate, no blur.
+            let showsGlyph = enableClosedPlayPauseOverlay && isHoveringClosedMusicWaveformControl
             SpectrumVisualizer(useMusicVisualizer: useMusicVisualizer, forceSpectrum: forceSpectrum)
-                .blur(radius: (enableClosedPlayPauseOverlay && isHoveringClosedMusicWaveformControl) ? 2.4 : 0)
+                .opacity(showsGlyph ? 0 : 1)
                 .overlay {
                     if enableClosedPlayPauseOverlay {
-                        ZStack {
-                            RoundedRectangle(cornerRadius: 8)
-                                .fill(Color.black.opacity(isHoveringClosedMusicWaveformControl ? 0.24 : 0.02))
-
-                            Image(systemName: musicManager.isPlaying ? "pause.fill" : "play.fill")
-                                .font(.system(size: 16, weight: .semibold))
-                                .foregroundStyle(.white.opacity(isHoveringClosedMusicWaveformControl ? 0.98 : 0.0))
-                                .contentTransition(.symbolEffect(.replace))
-                        }
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 6)
-                        .allowsHitTesting(false)
+                        Image(systemName: musicManager.isPlaying ? "pause.fill" : "play.fill")
+                            .font(DSE.Typeface.glyphClosed)
+                            .foregroundStyle(DSE.Palette.text)
+                            .opacity(showsGlyph ? 1 : 0)
+                            .contentTransition(.symbolEffect(.replace))
+                            .allowsHitTesting(false)
                     }
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                // Flush right, 8 from the wall (E §2.1).
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
                 .padding(.trailing, trailingInset)
+                .offset(x: ClosedWingE.outset)
                 .animation(.smooth(duration: 0.16), value: isHoveringClosedMusicWaveformControl)
                 .animation(.smooth(duration: 0.2), value: musicManager.isPlaying)
         } else {
-            LottieAnimationView()
+            LottieAnimationView(isPlaying: musicManager.isPlaying)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
@@ -2179,14 +2354,12 @@ struct ContentView: View {
             baseWidth: leadingWidth,
             maxWidth: leadingWidth + centerWidth * 0.6
         )
-        let totalWidth = leadingWidth + centerWidth + trailingWidth
-        return ExtensionStandaloneLayout(
-            totalWidth: totalWidth,
+        return ExtensionStandaloneLayout.equalWings(
             outerHeight: outerHeight,
             contentHeight: contentHeight,
-            leadingWidth: leadingWidth,
+            leadingContentWidth: leadingWidth,
             centerWidth: centerWidth,
-            trailingWidth: trailingWidth
+            trailingContentWidth: trailingWidth
         )
     }
 
@@ -2238,7 +2411,14 @@ struct ContentView: View {
             Color.clear
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .contentShape(Rectangle())
-                .onDrop(of: [.data], isTargeted: $vm.dragDetectorTargeting) { _ in true }
+                // A drag out of the island let go over the island again is
+                // not a drop: refusing it keeps "remove after drag" from
+                // counting it and the drag animates back.
+                .onDrop(of: [.data], isTargeted: $vm.dragDetectorTargeting) { _ in
+                    !(ScreenshotShelfManager.shared.isDragging
+                        || ShelfSelectionModel.shared.isDragging
+                        || ClipboardManager.shared.isDraggingItem)
+                }
                 .onChange(of: vm.anyDropZoneTargeting) { _, isTargeted in
                     if isTargeted {
                         let draggingOut = ScreenshotShelfManager.shared.isDragging
@@ -2274,7 +2454,49 @@ struct ContentView: View {
 
     // MARK: - Private Methods
     private func openNotch() {
+        if vm.notchState == .closed {
+            openBandFootprint = closedIslandFootprintUnderPointer()
+        }
         vm.open()
+    }
+
+    /// The closed island's hit area as it is drawn now, wings included, when
+    /// the pointer is on it and the open island will leave the menu bar
+    /// beside its neck (`openBandFootprint`). Read while still closed, so it
+    /// keeps the menu-clearance shift (0 once open) on the side it was drawn.
+    private func closedIslandFootprintUnderPointer(_ location: NSPoint = NSEvent.mouseLocation) -> CGRect? {
+        guard neckBandHeight > 0,
+              let screen = NSScreen.screens.first(where: { $0.localizedName == currentScreenName })
+        else { return nil }
+        let footprint = closedNotchHitArea(
+            on: screen,
+            surfaceWidth: MenuBarLayout.surfaceWidth(
+                contentWidth: closedContentWidth,
+                padding: notchHorizontalPadding
+            )
+        )
+        return IslandHoverZone.contains(footprint, location) ? footprint : nil
+    }
+
+    /// Drops `openBandFootprint` once the pointer has left it or gone down
+    /// into the panel (below the menu bar): from then on only the neck is
+    /// the island in the menu bar, so it never stays open over the titles.
+    private func releaseOpenBandFootprintIfLeft(_ location: NSPoint = NSEvent.mouseLocation) {
+        guard let footprint = openBandFootprint else { return }
+        let stillOnIt = vm.notchState == .open
+            && IslandHoverZone.contains(footprint, location)
+            && NSScreen.screens.first(where: { $0.localizedName == currentScreenName })
+                .map { location.y >= $0.frame.maxY - neckBandHeight } == true
+        if !stillOnIt {
+            openBandFootprint = nil
+        }
+    }
+
+    /// Open, whether the pointer still rests on the closed island it opened
+    /// from, in the menu bar beside the neck (`openBandFootprint`).
+    private func isPointerOverOpenBandFootprint(_ location: NSPoint = NSEvent.mouseLocation) -> Bool {
+        releaseOpenBandFootprintIfLeft(location)
+        return openBandFootprint != nil
     }
 
     private func shouldShowClosedMusicWaveformPlayPauseOverlay(for secondary: MusicSecondaryLiveActivity?) -> Bool {
@@ -2337,7 +2559,7 @@ struct ContentView: View {
         stopHoverClickMonitor()
         removeStickyTerminalClickMonitor()
         stopHiddenEdgeHoverPolling()
-        stopEarHoverMonitor()
+        stopHiddenIslandPointerMonitor()
         cancelMusicControlWindowSync()
         hideMusicControlWindow()
         cancelMusicControlVisibilityTimer()
@@ -2346,17 +2568,21 @@ struct ContentView: View {
         isHoveringClosedMusicWaveformControl = false
     }
 
+    /// While the pointer is over the island, checks every 100 ms that it is
+    /// still there, for an island that resizes away from a pointer that does
+    /// not move. Runs only while hovering. Upstream ran this loop all the time:
+    /// once a second while nothing happened, 20 times a second with "hide
+    /// until hover" -- which the pointer moves (`handleHiddenIslandPointerMove`) now
+    /// cover.
     private func startHiddenEdgeHoverPolling() {
         guard hiddenEdgeHoverPollingTask == nil else { return }
 
         hiddenEdgeHoverPollingTask = Task { @MainActor in
-            while !Task.isCancelled {
-                if self.shouldUseHiddenEdgeHoverPolling {
-                    let hovering = self.hiddenHoverActivationContainsMouse()
-                    if hovering != self.isHovering {
-                        self.handleHover(hovering)
-                    }
-                } else if self.isHovering && self.interactionsEnabled {
+            while !Task.isCancelled, self.isHovering, self.interactionsEnabled {
+                if !self.shouldUseHiddenEdgeHoverPolling {
+                    // Beside the neck no hover event comes: the pointer
+                    // leaving the closed island's place is seen here.
+                    self.releaseOpenBandFootprintIfLeft()
                     let stillInside = self.vm.notchState == .open
                         ? self.isPointInsideNotchWindow()
                         : self.pointerOverIslandView || self.isMouseOverClosedNotchHitArea()
@@ -2364,67 +2590,62 @@ struct ContentView: View {
                         self.hoverTask?.cancel()
                         self.stopHoverClickMonitor()
                         self.finishHoverExit()
+                        break
                     }
                 }
 
-                try? await Task.sleep(for: .milliseconds(self.hiddenEdgeHoverPollingIntervalMs()))
+                try? await Task.sleep(for: .milliseconds(100))
             }
 
             self.hiddenEdgeHoverPollingTask = nil
         }
     }
 
-    private func hiddenEdgeHoverPollingIntervalMs() -> Int {
-        if shouldUseHiddenEdgeHoverPolling {
-            return 50
-        }
-        if isHovering && interactionsEnabled {
-            return 100
-        }
-        return 1_000
+    /// The pointer watch runs only for "hide until hover": the island is off
+    /// screen there, so no view of it can see the pointer. Otherwise hovering
+    /// is the island's own `.onHover` (a tracking area), which costs nothing
+    /// while the pointer is elsewhere; the ears beside the notch, which needed
+    /// every pointer move of the session, are gone (measured: 2.4-2.8 % CPU
+    /// with the mouse moving, 0.07 % without them; docs/perf/REPORT-energy.md).
+    private var wantsHiddenIslandPointerMonitor: Bool {
+        vm.notchState == .closed
+            && activityGate.state.userPresent
+            && shouldHideUntilHover
     }
 
-    /// Opens the closed island when the pointer rests in an ear beside the
-    /// notch, where it stays visible. Watches pointer moves only: the ears
-    /// take no clicks from the menu bar items under them.
-    private func startEarHoverMonitor() {
-        guard earHoverMonitors.isEmpty else { return }
+    private func syncHiddenIslandPointerMonitor() {
+        if wantsHiddenIslandPointerMonitor {
+            startHiddenIslandPointerMonitor()
+        } else {
+            stopHiddenIslandPointerMonitor()
+        }
+    }
+
+    /// Opens the hidden island when the pointer reaches the strip where it
+    /// would be. Watches pointer moves only: no clicks are taken.
+    private func startHiddenIslandPointerMonitor() {
+        guard hiddenIslandPointerMonitors.isEmpty else { return }
         let global = NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved]) { _ in
-            MainActor.assumeIsolated { self.handleEarPointerMove() }
+            MainActor.assumeIsolated { self.handleHiddenIslandPointerMove() }
         }
         let local = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved]) { event in
-            MainActor.assumeIsolated { self.handleEarPointerMove() }
+            MainActor.assumeIsolated { self.handleHiddenIslandPointerMove() }
             return event
         }
-        earHoverMonitors = [global, local].compactMap { $0 }
+        hiddenIslandPointerMonitors = [global, local].compactMap { $0 }
     }
 
-    private func stopEarHoverMonitor() {
-        earHoverMonitors.forEach(NSEvent.removeMonitor)
-        earHoverMonitors = []
+    private func stopHiddenIslandPointerMonitor() {
+        hiddenIslandPointerMonitors.forEach(NSEvent.removeMonitor)
+        hiddenIslandPointerMonitors = []
     }
 
-    private func handleEarPointerMove() {
-        guard vm.notchState == .closed,
-              interactionsEnabled,
-              !shouldUseHiddenEdgeHoverPolling,
-              !vm.hideOnClosed,
-              Defaults[.openNotchOnHover] else { return }
-        let location = NSEvent.mouseLocation
-        // Most moves are far from the top edge: nothing to work out.
-        if !isHovering, let screen = NSScreen.screens.first(where: { $0.localizedName == currentScreenName }),
-           location.y < screen.frame.maxY - 120 {
-            return
-        }
-        switch IslandHoverZone.change(
-            inZone: isMouseOverClosedNotchHitArea(location),
-            overIsland: pointerOverIslandView,
-            isHovering: isHovering
-        ) {
-        case .enter: handleHover(true)
-        case .exit: handleHover(false)
-        case .none: break
-        }
+    private func handleHiddenIslandPointerMove() {
+        // "Hide until hover": the island is off screen, so only the strip
+        // where it would be counts (upstream polled for it 20 times a second).
+        guard vm.notchState == .closed, interactionsEnabled, shouldUseHiddenEdgeHoverPolling else { return }
+        let hovering = hiddenHoverActivationContainsMouse(NSEvent.mouseLocation)
+        if hovering != isHovering { handleHover(hovering) }
     }
 
     private func stopHiddenEdgeHoverPolling() {
@@ -2447,9 +2668,9 @@ struct ContentView: View {
                 guard !self.recordingOpenGestureLocked else { return }
                 guard !self.coordinator.isHoverOpenSuppressed else { return }
                 guard self.isHovering else { return }
-                // A click in an ear belongs to the menu bar item under it.
+                // A click beside the island belongs to the menu bar item under it.
                 guard IslandHoverZone.clickOpens(
-                    onNotch: self.isMouseOverClosedNotchHitArea(includingEars: false),
+                    onNotch: self.isMouseOverClosedNotchHitArea(),
                     overIsland: self.pointerOverIslandView
                 ) else { return }
                 guard !self.handleClosedMusicWaveformTapIfNeeded() else { return }
@@ -2531,18 +2752,33 @@ struct ContentView: View {
     
     /// Handle hover state changes with debouncing
     private func handleHover(_ hovering: Bool) {
+        // Open, the pointer coming into the panel (or off the closed island's
+        // place beside the neck) lets that place go before anything below
+        // asks whether the pointer is still on the island.
+        releaseOpenBandFootprintIfLeft()
         // Ignore false hover-exit when the cursor is parked on the screen's top pixel.
         if !hovering, shouldRetainHoverAtScreenTopEdge() {
             return
         }
-        // Leaving the drawn island for an ear keeps the hover.
+        // Leaving the drawn island for the strip below it keeps the hover.
         if !hovering, vm.notchState == .closed, isMouseOverClosedNotchHitArea() {
+            return
+        }
+        // Open, so does the closed island's place beside the neck, where the
+        // pointer that opened it still rests; leaving it for the menu bar is
+        // the hover poll's to see.
+        if !hovering, isPointerOverOpenBandFootprint() {
             return
         }
 
         hoverTask?.cancel()
 
         if hovering {
+            // Opened by the shortcut: the pointer has arrived, so the hover
+            // logic decides when it closes, not the shortcut's 3 s timer.
+            if vm.notchState == .open {
+                AppDelegate.shared?.cancelPendingNotchAutoClose()
+            }
             if !recordingLiveActivityVisibleOnClosedNotch {
                 startHoverClickMonitor()
             }
@@ -2560,6 +2796,7 @@ struct ContentView: View {
             withAnimation(.bouncy.speed(1.2)) {
                 isHovering = true
             }
+            startHiddenEdgeHoverPolling()
 
             if vm.notchState == .closed && Defaults[.enableHaptics] {
                 triggerHapticIfAllowed()
@@ -2638,14 +2875,19 @@ struct ContentView: View {
         return isMouseOverClosedNotchHitArea(location)
     }
 
-    /// The closed island's hit area: the drawn island with 12 pt either side
-    /// and 6 pt below, where a click opens it; with `includingEars`, also the
-    /// hover ears, where resting the pointer opens it.
-    private func isMouseOverClosedNotchHitArea(_ location: NSPoint = NSEvent.mouseLocation, includingEars: Bool = true) -> Bool {
+    /// The closed island's hit area: the notch and 6 pt below it, where a
+    /// click opens it and a hover stays (`IslandHoverZone.clickArea`; the
+    /// drawn island, wings included, is its own `.onHover`).
+    private func isMouseOverClosedNotchHitArea(_ location: NSPoint = NSEvent.mouseLocation) -> Bool {
         guard let screen = NSScreen.screens.first(where: { $0.localizedName == currentScreenName }) else {
             return false
         }
+        return IslandHoverZone.contains(closedNotchHitArea(on: screen), location)
+    }
 
+    /// The hit area around the closed notch on `screen`; `surfaceWidth`
+    /// widens it to the drawn black surface (the wings with music).
+    private func closedNotchHitArea(on screen: NSScreen, surfaceWidth: CGFloat = 0) -> CGRect {
         let closedHeight = vm.effectiveClosedNotchHeight + (isHovering ? 8 : 0)
         let closedWidth = max(vm.closedNotchSize.width + (isHovering ? 8 : 0), 96)
         let recordingSize = recordingHUDLayout.size(
@@ -2655,24 +2897,44 @@ struct ContentView: View {
         let height = max(closedHeight, recordingSize?.height ?? 0)
             + PinnedLyricsView.reservedHeight(isEligible: pinnedLyricsVisible,
                 availability: musicManager.lyricsAvailability, context: pinnedLyricContext)
-        let width = max(closedWidth, recordingSize?.width ?? 0)
+        let width = max(closedWidth, recordingSize?.width ?? 0, surfaceWidth)
         // Same shift the content is drawn with, so the hit area stays under it.
         let notch = IslandHoverZone.notchRect(screenFrame: screen.frame, width: width, height: height, xOffset: menuBarClearanceOffset)
-        let area = includingEars ? IslandHoverZone.zone(around: notch) : IslandHoverZone.clickArea(around: notch)
-        return IslandHoverZone.contains(area, location)
+        return IslandHoverZone.clickArea(around: notch)
     }
 
     private func isPointInsideNotchWindow(_ point: CGPoint = NSEvent.mouseLocation) -> Bool {
         if let appDelegate = AppDelegate.shared {
             if Defaults[.showOnAllDisplays] {
-                return appDelegate.windows.values.contains(where: { frameContainsPointIncludingTopEdge($0.frame, point) })
+                return appDelegate.windows.values.contains(where: { islandWindowContainsPoint($0, point) })
             }
             if let window = appDelegate.window {
-                return frameContainsPointIncludingTopEdge(window.frame, point)
+                return islandWindowContainsPoint(window, point)
             }
         }
 
         return NSApp.windows.contains(where: { frameContainsPointIncludingTopEdge($0.frame, point) })
+    }
+
+    /// The island's window, less the menu bar beside the open neck: that
+    /// band belongs to the menus (`OpenIslandNeck`), so the pointer or a
+    /// click there is outside the island, unless it still rests on the
+    /// closed island it opened from (`openBandFootprint`).
+    private func islandWindowContainsPoint(_ window: NSWindow, _ point: CGPoint) -> Bool {
+        guard frameContainsPointIncludingTopEdge(window.frame, point) else { return false }
+        guard let screen = window.screen ?? NSScreen.screens.first(where: { $0.frame.intersects(window.frame) }) else {
+            return true
+        }
+        return OpenIslandNeck.windowContains(
+            point,
+            windowFrame: window.frame,
+            screenFrame: screen.frame,
+            bandHeight: OpenIslandNeck.bandHeight(forScreenNamed: screen.localizedName),
+            neckOuterWidth: OpenIslandNeck.outerWidth(
+                closedNotchWidth: getClosedNotchSize(screen: screen.localizedName).width
+            ),
+            footprint: openBandFootprint
+        )
     }
 
     /// `CGRect.contains` is half-open on max edges; the top pixel needs inclusive maxY.
@@ -2710,7 +2972,7 @@ struct ContentView: View {
         // Without this, the hover-exit timer closes the panel mid-drag, tearing
         // down the NSView that is acting as the drag source and cancelling the
         // session — an independent second cause of "drag-out doesn't work".
-        coordinator.firstLaunch || hasAnyActivePopovers() || vm.isAutoCloseSuppressed || ShelfSelectionModel.shared.isDragging || ClipboardManager.shared.isDraggingItem || SharingStateManager.shared.preventNotchClose || (Defaults[.terminalStickyMode] && coordinator.currentView == .terminal)
+        coordinator.firstLaunch || hasAnyActivePopovers() || vm.isAutoCloseSuppressed || ShelfSelectionModel.shared.isDragging || ClipboardManager.shared.isDraggingItem || ScreenshotShelfManager.shared.isDragging || SharingStateManager.shared.preventNotchClose || (Defaults[.terminalStickyMode] && coordinator.currentView == .terminal)
     }
     
     // Helper to prevent rapid haptic feedback

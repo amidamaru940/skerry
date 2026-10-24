@@ -61,6 +61,46 @@ final class OnboardingFlowTests: XCTestCase {
         }
     }
 
+    /// §5.8: «Continue» on step two with Screenshots on is when the
+    /// screenshot folder is first looked at (and macOS may ask), not launch.
+    func testContinueOnStepTwoWithScreenshotsOnStartsThem() {
+        XCTAssertTrue(OnboardingFlow.startsScreenshots(leaving: .features, for: .permission, screenshotsOn: true))
+        XCTAssertFalse(OnboardingFlow.startsScreenshots(leaving: .features, for: .permission, screenshotsOn: false),
+                       "turned off on step two")
+        XCTAssertFalse(OnboardingFlow.startsScreenshots(leaving: .features, for: .hello, screenshotsOn: true), "Back")
+        XCTAssertFalse(OnboardingFlow.startsScreenshots(leaving: .hello, for: .features, screenshotsOn: true), "step one")
+        XCTAssertFalse(OnboardingFlow.startsScreenshots(leaving: .permission, for: .features, screenshotsOn: true), "Back from three")
+    }
+
+    /// Screenshots are one feature (owner, 22.10): the step-two switch also
+    /// collects those taken to the clipboard, and turns them off with it.
+    func testTheScreenshotsSwitchAlsoCollectsClipboardScreenshots() throws {
+        let shelf = Defaults[.enableScreenshotShelf], collect = Defaults[.collectClipboardScreenshots]
+        let clipboard = Defaults[.enableClipboardManager]
+        defer {
+            Defaults[.enableScreenshotShelf] = shelf
+            Defaults[.collectClipboardScreenshots] = collect
+            Defaults[.enableClipboardManager] = clipboard
+        }
+        let screenshots = try XCTUnwrap(OnboardingFlow.features.first { $0.id == "screenshots" })
+
+        OnboardingFlow.setFeature(screenshots, on: false)
+        XCTAssertFalse(Defaults[.enableScreenshotShelf])
+        XCTAssertFalse(Defaults[.collectClipboardScreenshots], "off with the switch")
+        XCTAssertFalse(ClipboardScreenshotDetector.routesToScreenshots)
+
+        OnboardingFlow.setFeature(screenshots, on: true)
+        XCTAssertTrue(Defaults[.enableScreenshotShelf])
+        XCTAssertTrue(Defaults[.collectClipboardScreenshots], "on with the switch")
+        XCTAssertTrue(ClipboardScreenshotDetector.routesToScreenshots, "⌃⇧⌘4 goes to the batches")
+
+        // Another switch sets only its own key.
+        let clipboardFeature = try XCTUnwrap(OnboardingFlow.features.first { $0.id == "clipboard" })
+        OnboardingFlow.setFeature(clipboardFeature, on: false)
+        XCTAssertFalse(Defaults[.enableClipboardManager])
+        XCTAssertTrue(Defaults[.collectClipboardScreenshots])
+    }
+
     /// Draws each step; with SKERRY_SNAPSHOT_DIR set the pictures are saved.
     @MainActor
     func testEachStepDraws() throws {

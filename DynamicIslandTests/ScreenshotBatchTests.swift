@@ -165,9 +165,30 @@ final class ScreenshotBatchStoreTests: XCTestCase {
         XCTAssertEqual(store.fileURLs(for: [late.path, early.path]).map(\.lastPathComponent), ["early.png", "late.png"])
     }
 
+    /// Before the screenshot folder was asked for, only the temporary
+    /// clipboard screenshots are looked at: a Desktop path would be the
+    /// macOS prompt (§5.8).
+    func testPruningCanLookAtSomePathsOnly() {
+        let store = makeStore()
+        let saved = shot("saved"), temporary = shot("temporary")
+        store.add(saved, capturedAt: start)
+        store.add(temporary, capturedAt: start.addingTimeInterval(1))
+        existing = []
+        var looked: [String] = []
+        let lookingStore = ScreenshotBatchStore(fileURL: nil, batchGap: { 900 }, fileExists: { looked.append($0); return false })
+        lookingStore.add(saved, capturedAt: start)
+        lookingStore.add(temporary, capturedAt: start.addingTimeInterval(1))
+        lookingStore.pruneMissingFiles(only: { $0 == temporary.path })
+        XCTAssertEqual(looked, [temporary.path], "the saved one is not looked at")
+        XCTAssertEqual(lookingStore.allItems.map(\.path), [saved.path])
+
+        store.pruneMissingFiles()
+        XCTAssertTrue(store.isEmpty, "without a limit every path is looked at")
+    }
+
     func testScreenshotDefaults() {
         XCTAssertFalse(Defaults.Keys.screenshotMoveOriginalsToTrash.defaultValue)
-        XCTAssertFalse(Defaults.Keys.collectClipboardScreenshots.defaultValue)
+        XCTAssertTrue(Defaults.Keys.collectClipboardScreenshots.defaultValue, "clipboard screenshots join the batches unless turned off (owner, 22.10)")
         XCTAssertTrue(Defaults.Keys.enableScreenshotShelf.defaultValue)
         XCTAssertEqual(Defaults.Keys.screenshotBatchGapMinutes.defaultValue, 15)
     }

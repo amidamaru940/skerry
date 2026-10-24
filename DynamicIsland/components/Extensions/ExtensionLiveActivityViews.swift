@@ -27,6 +27,41 @@ struct ExtensionStandaloneLayout {
     let leadingWidth: CGFloat
     let centerWidth: CGFloat
     let trailingWidth: CGFloat
+    /// The leading glyph's own box, flush left in its wing.
+    var leadingContentWidth: CGFloat? = nil
+
+    /// Equal wings (E §2.1): the island is centred on the camera, so a
+    /// trailing value wider than the 44 pt glyph wing slid in under the
+    /// camera. Both wings take the wider; each content keeps its own box.
+    static func equalWings(
+        outerHeight: CGFloat,
+        contentHeight: CGFloat,
+        leadingContentWidth: CGFloat,
+        centerWidth: CGFloat,
+        trailingContentWidth: CGFloat
+    ) -> ExtensionStandaloneLayout {
+        let wing = max(leadingContentWidth, trailingContentWidth)
+        return ExtensionStandaloneLayout(
+            totalWidth: 2 * wing + centerWidth,
+            outerHeight: outerHeight,
+            contentHeight: contentHeight,
+            leadingWidth: wing,
+            centerWidth: centerWidth,
+            trailingWidth: wing,
+            leadingContentWidth: leadingContentWidth
+        )
+    }
+
+    func closedGeometry(closedNotchWidth: CGFloat, trailingContent: CGFloat) -> ClosedWingGeometry {
+        ClosedWingGeometry(
+            leadingWing: leadingWidth,
+            middle: centerWidth,
+            trailingWing: trailingWidth,
+            leadingContent: leadingContentWidth ?? leadingWidth,
+            trailingContent: trailingContent,
+            camera: ClosedWingE.cameraWidth(closedNotchWidth: closedNotchWidth)
+        )
+    }
 }
 
 struct ExtensionLiveActivityStandaloneView: View {
@@ -46,11 +81,12 @@ struct ExtensionLiveActivityStandaloneView: View {
                 content: resolvedLeadingContent,
                 badge: descriptor.badgeIcon,
                 accent: accentColor,
-                frameWidth: layout.leadingWidth,
+                frameWidth: layout.leadingContentWidth ?? layout.leadingWidth,
                 frameHeight: contentHeight,
                 defaultIcon: descriptor.leadingIcon
             )
-            .frame(width: layout.leadingWidth, height: contentHeight)
+            .frame(width: layout.leadingContentWidth ?? layout.leadingWidth, height: contentHeight)
+            .frame(width: layout.leadingWidth, height: contentHeight, alignment: .leading)
 
             Rectangle()
                 .fill(Color.black)

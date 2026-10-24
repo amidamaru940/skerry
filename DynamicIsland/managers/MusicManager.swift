@@ -742,10 +742,7 @@ class MusicManager: ObservableObject {
 
         // Listen for changes to the default controller preference
         NotificationCenter.default.publisher(for: Notification.Name.mediaControllerChanged)
-            .sink { [weak self] _ in
-                self?.isPearDesktopAutoSwitched = false
-                self?.setActiveControllerBasedOnPreference()
-            }
+            .sink { [weak self] _ in self?.mediaSourceChosen() }
             .store(in: &cancellables)
 
         Defaults.publisher(.enableLyrics)
@@ -895,6 +892,39 @@ class MusicManager: ObservableObject {
         }
 
         return newController
+    }
+
+    /// The source picked in Settings: a click, so Music or Spotify may be
+    /// asked about (§5.8).
+    private func mediaSourceChosen() {
+        isPearDesktopAutoSwitched = false
+        setActiveControllerBasedOnPreference()
+        Self.readScriptedPlayerAfterClick(activeController)
+    }
+
+    /// §5.8: a click that needs Music or Spotify but sends it nothing itself
+    /// -- choosing it as the source, «Open player» -- is when macOS may ask
+    /// about scripting it. Without this a fresh install with the source set
+    /// to one of them would never show a track: every other read waits for a
+    /// yes, and with nothing to show the island hides the player. Allowed
+    /// already (the owner's Mac): nothing happens. Auto asks from its own
+    /// controls instead.
+    /// - Parameter opened: the app «Open player» has just launched, which
+    ///   may not show as running yet.
+    private static func readScriptedPlayerAfterClick(
+        _ controller: (any MediaControllerProtocol)?,
+        opened: String? = nil
+    ) {
+        switch controller {
+        case let music as AppleMusicController:
+            let launched = opened == AutoMediaSource.appleMusicBundleID
+            Task { await music.refreshAfterClick(launched: launched) }
+        case let spotify as SpotifyController:
+            let launched = opened == SpotifyController.bundleIdentifier
+            Task { await spotify.refreshAfterClick(launched: launched) }
+        default:
+            break
+        }
     }
 
     private func setActiveControllerBasedOnPreference() {
@@ -1813,13 +1843,16 @@ class MusicManager: ObservableObject {
         }
 
         let workspace = NSWorkspace.shared
+        let controller = activeController
         if let appURL = workspace.urlForApplication(withBundleIdentifier: bundleID) {
             let configuration = NSWorkspace.OpenConfiguration()
-            workspace.openApplication(at: appURL, configuration: configuration) { (_, error) in
+            workspace.openApplication(at: appURL, configuration: configuration) { (app, error) in
                 if let error = error {
                     print("Failed to launch app with bundle ID: \(bundleID), error: \(error)")
                 } else {
                     print("Launched app with bundle ID: \(bundleID)")
+                    // Music or Spotify runs now, so the read can ask.
+                    Self.readScriptedPlayerAfterClick(controller, opened: app?.bundleIdentifier)
                 }
             }
         } else {

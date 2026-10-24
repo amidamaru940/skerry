@@ -222,16 +222,22 @@ struct DynamicIslandArtworkSourceView: View {
 
 // MARK: - Music Player Components
 
+/// The open player in E's language (docs/design/VISUAL-E.md §3): the 128 pt
+/// cover with its light, and 12 to its right the hero title, the artist and
+/// the bare transport glyphs. The seek is the island's bottom edge
+/// (`NotchHomeView`), not part of this view.
 struct MusicPlayerView: View {
     @EnvironmentObject var vm: DynamicIslandViewModel
     let albumArtNamespace: Namespace.ID
+    /// «Далее» stands beside the player, so its row keeps ⤮ and «Звук» only.
+    var besideNext = false
     /// The secondary buttons show only while the pointer is over the player.
     @State private var isHovering = false
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
-            AlbumArtView(vm: vm, albumArtNamespace: albumArtNamespace)
-            MusicControlsView(isPlayerHovered: isHovering)
+            AlbumArtView(vm: vm, albumArtNamespace: albumArtNamespace, isPlayerHovered: isHovering)
+            MusicControlsView(isPlayerHovered: isHovering, besideNext: besideNext)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -248,11 +254,8 @@ struct LyricsSidePanelView: View {
     @Default(.pinLyricsWhenClosed) private var pinLyricsWhenClosed
     @State private var suppressionToken = UUID()
     @State private var isSuppressing = false
-    private var artistLineColor: Color {
-        Defaults[.playerColorTinting]
-            ? Color(nsColor: musicManager.avgColor).ensureMinimumBrightness(factor: 0.6)
-            : DS.Palette.textSecondary
-    }
+    /// E: no colour from the cover on text; it lives on the edge only.
+    private var artistLineColor: Color { DSE.Palette.textSecondary }
 
     /// The colour a line has yet to be sung in. Tinted rather than plain grey so
     /// the unsung remainder still reads as part of the current line.
@@ -268,22 +271,20 @@ struct LyricsSidePanelView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 6) {
-                Text("Lyrics")
-                    .font(.headline)
-                    .foregroundStyle(artistLineColor)
+                MicroLabel(String(localized: "Lyrics"))
                 Spacer()
                 pinButton
             }
-            .padding(.horizontal, 12)
-            .padding(.top, 10)
-            .padding(.bottom, 6)
+            .frame(height: 12)
+            .padding(.leading, 12)
+            .padding(.bottom, 8)
 
             SyncedLyricsList(musicManager: musicManager, style: lyricsStyle)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        // The same card as "Next", which takes this column when lyrics are off.
-        .background(DS.Palette.surface)
-        .clipShape(RoundedRectangle(cornerRadius: DS.Radius.panel, style: .continuous))
+        // E: the same hairline column as "Next", which takes this place when
+        // lyrics are off; no card.
+        .background(alignment: .leading) { Hairline(axis: .vertical) }
         .onHover { hovering in
             updateSuppression(for: hovering)
         }
@@ -327,135 +328,93 @@ struct LyricsSidePanelView: View {
     }
 }
 
+/// The hero of «Сейчас»: the cover, 128 × 128, radius 10, aspect fill, no
+/// rim, over its static light (L3) in the colour sampled once per picture.
+/// Paused: the cover at 0.6 and its light at 35 %. No art: the 5 % square
+/// with a note and the source's icon, in the neutral light.
 struct AlbumArtView: View {
     @ObservedObject var musicManager = MusicManager.shared
     @ObservedObject var vm: DynamicIslandViewModel
-    @Default(.showLiveCanvasInDynamicIsland) private var showLiveCanvasInDynamicIsland
     let albumArtNamespace: Namespace.ID
+    /// The source's icon shows on the cover only under the pointer.
+    var isPlayerHovered = false
+    @State private var light: Color
 
-    private var usesLiveCanvasArtwork: Bool {
-        showLiveCanvasInDynamicIsland && musicManager.videoArtworkURL != nil
-    }
+    /// The closed wing asks the same question, so the two always agree.
+    private var hasArtwork: Bool { musicManager.showsRealArtwork }
 
-    private var albumArtCornerRadius: CGFloat {
-        Defaults[.cornerRadiusScaling]
-            ? musicManager.albumArt.size.width / musicManager.albumArt.size.height > 1.0
-                ? MusicPlayerImageSizes.cornerRadiusInset.opened / 3
-                : MusicPlayerImageSizes.cornerRadiusInset.opened
-            : musicManager.albumArt.size.width / musicManager.albumArt.size.height > 1.0
-                ? MusicPlayerImageSizes.cornerRadiusInset.closed / 3
-                : MusicPlayerImageSizes.cornerRadiusInset.closed
+    init(vm: DynamicIslandViewModel, albumArtNamespace: Namespace.ID, isPlayerHovered: Bool = false) {
+        _vm = ObservedObject(wrappedValue: vm)
+        self.albumArtNamespace = albumArtNamespace
+        self.isPlayerHovered = isPlayerHovered
+        // A cover already sampled (the closed wing did it) lights at once,
+        // so opening does not recolour from neutral (M4).
+        let music = MusicManager.shared
+        let cached = music.showsRealArtwork ? LightColor.cachedLight(of: music.albumArt) : nil
+        _light = State(initialValue: cached.map(LightColor.color) ?? DSE.Palette.lightNeutral)
     }
 
     var body: some View {
-        ZStack(alignment: .bottomTrailing) {
-            if Defaults[.lightingEffect] {
-                albumArtBackground
-            }
-            albumArtButton
-        }
-    }
-
-    private var albumArtBackground: some View {
-        GeometryReader { geo in
-            Color.clear
-                .background(
-                    Image(nsImage: musicManager.albumArtGlowTexture)
-                        .resizable()
-                        .aspectRatio(nil, contentMode: .fill)
-                )
-                .mask(
-                    RadialGradient(
-                        gradient: Gradient(colors: [.white, .white.opacity(0.7), .clear]),
-                        center: .center,
-                        startRadius: 0,
-                        endRadius: geo.size.width * 0.65
-                    )
-                )
-                .scaleEffect(x: 1.3, y: 1.4)
-                .rotationEffect(.degrees(92))
-                .opacity(
-                    usesLiveCanvasArtwork
-                        ? (musicManager.isPlaying ? 0.62 : 0.18)
-                        : (musicManager.isPlaying ? 0.5 : 0)
-                )
-                .shadow(
-                    color: Color(nsColor: musicManager.avgColor).opacity(usesLiveCanvasArtwork ? 0.24 : 0.16),
-                    radius: usesLiveCanvasArtwork ? 22 : 14,
-                    x: 0,
-                    y: 0
-                )
-        }
-        .aspectRatio(1, contentMode: .fit)
-    }
-
-    private var albumArtButton: some View {
-        ZStack {
-            Button {
-                musicManager.openMusicApp()
-            } label: {
-                ZStack(alignment:.bottomTrailing) {
-                    albumArtImage
-                    appIconOverlay
-                }
+        Button {
+            musicManager.openMusicApp()
+        } label: {
+            artwork
+                .frame(width: DSE.Size.cover, height: DSE.Size.cover)
+                .clipShape(RoundedRectangle(cornerRadius: DSE.Radius.artOpen, style: .continuous))
+                .matchedGeometryEffect(id: "albumArt", in: albumArtNamespace)
                 .albumArtFlip(angle: musicManager.flipAngle)
-                .parallax3D()
-                .padding(.bottom, -5)
-
-            }
-            .buttonStyle(PlainButtonStyle())
-            .scaleEffect(musicManager.isPlaying ? 1 : 0.85)
-            
-            albumArtDarkOverlay
+                .opacity(musicManager.isPlaying ? 1 : DSE.Opacity.dimmed)
+                .overlay(alignment: .bottomTrailing) { sourceBadge }
         }
-    }
-
-    private var albumArtDarkOverlay: some View {
-        Rectangle()
-            .aspectRatio(1, contentMode: .fit)
-            .foregroundColor(Color.black)
-            .opacity(musicManager.isPlaying ? 0 : 0.8)
-            .blur(radius: 50)
-            // Only shade: while paused it covered the artwork button, so a
-            // click on the artwork did nothing and the hover tilt stopped.
-            .allowsHitTesting(false)
-    }
-
-    private var albumArtImage: some View {
-        Color.clear
-            .aspectRatio(1, contentMode: .fit)
-            .overlay {
-                DynamicIslandArtworkSourceView(
-                    cornerRadius: albumArtCornerRadius,
-                    contentMode: .fit
-                )
-            }
-            .matchedGeometryEffect(id: "albumArt", in: albumArtNamespace)
-        .clipped()
+        .buttonStyle(PressDimStyle())
+        .background {
+            CoverGlow(color: light, strength: musicManager.isPlaying ? 1 : DSE.Opacity.pausedLight)
+        }
+        .animation(.easeOut(duration: 0.2), value: musicManager.isPlaying)
+        // Once per picture, off the main thread; nothing runs in between.
+        .task(id: ObjectIdentifier(musicManager.albumArt)) {
+            let sampled = hasArtwork ? await LightColor.lightColor(of: musicManager.albumArt) : DSE.Palette.lightNeutral
+            withAnimation(.easeOut(duration: 0.2)) { light = sampled }
+        }
     }
 
     @ViewBuilder
-    private var appIconOverlay: some View {
-        if vm.notchState == .open && !musicManager.usingAppIconForArtwork {
+    private var artwork: some View {
+        if hasArtwork {
+            DynamicIslandArtworkSourceView(cornerRadius: 0, contentMode: .fill)
+        } else {
+            ZStack {
+                DSE.Palette.placeholder
+                Image(systemName: "music.note")
+                    .font(.system(size: 28, weight: .regular))
+                    .foregroundStyle(DSE.Palette.textTertiary)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var sourceBadge: some View {
+        if vm.notchState == .open && (isPlayerHovered || !hasArtwork) {
             AppIcon(for: musicManager.bundleIdentifier ?? "com.apple.Music")
                 .resizable()
-                .scaledToFill()
-                .frame(width: 36, height: 36)
-                .offset(x: 10, y: 10)
-                .transition(.scale.combined(with: .opacity).animation(.bouncy.delay(0.3)))
-                .zIndex(2)
+                .scaledToFit()
+                .frame(width: 16, height: 16)
+                .offset(x: 4, y: 4)
+                .transition(.opacity)
+                .accessibilityHidden(true)
         }
     }
 }
 
 struct MusicControlsView: View {
     var isPlayerHovered = false
+    /// «Далее» takes the space after the 178 pt column: the row keeps ⤮ and
+    /// «Звук», and «…» lists the rest (VISUAL-E §2.5).
+    var besideNext = false
     @EnvironmentObject var vm: DynamicIslandViewModel
     @ObservedObject var musicManager = MusicManager.shared
     @ObservedObject var coordinator = DynamicIslandViewCoordinator.shared
-    @State private var sliderValue: Double = MusicManager.shared.estimatedPlaybackPosition()
-    @State private var dragging: Bool = false
-    @State private var lastDragged: Date = .distantPast
+    @Environment(\.colorSchemeContrast) private var contrast
     @State private var hudValue: Double = 0
     @State private var hudDragging: Bool = false
     @State private var hudLastDragged: Date = .distantPast
@@ -467,59 +426,74 @@ struct MusicControlsView: View {
     @Default(.showCalendar) private var showCalendar
     @Default(.islandLayout) private var islandLayout
     @Default(.showPlayerVolumeRow) private var showPlayerVolumeRow
+    @State private var overflowToken = UUID()
     private let seekInterval: TimeInterval = 10
 
+    /// The text column: the title at y 0, the artist under it, the transport
+    /// row at y 90–130 (⏯'s 40 box; ⏮ ⏭ 28 at y 96–124), on the cover's axis.
     var body: some View {
-        VStack(alignment: .leading) {
-            songInfoAndSlider
-            if shouldShowControlHUDRow {
-                controlHUDRow
-            } else {
-                playbackControls
+        GeometryReader { geo in
+            VStack(alignment: .leading, spacing: 0) {
+                songInfo(width: geo.size.width)
+                Spacer(minLength: 0)
+                Group {
+                    if shouldShowControlHUDRow {
+                        controlHUDRow
+                    } else {
+                        playbackControls
+                    }
+                }
+                .frame(width: geo.size.width, height: 40, alignment: .leading)
             }
         }
+        .frame(height: 130)
         .buttonStyle(PlainButtonStyle())
         .frame(maxWidth: .infinity, alignment: .leading)
+        // What the row leaves out goes to «…»; set on change only.
+        .onAppear { PlayerOverflow.shared.set(rowLayout.overflow, owner: overflowToken) }
+        .onChange(of: rowLayout.overflow) { _, buttons in
+            PlayerOverflow.shared.set(buttons, owner: overflowToken)
+        }
+        .onDisappear { PlayerOverflow.shared.clear(owner: overflowToken) }
     }
 
-    private var songInfoAndSlider: some View {
-        GeometryReader { geo in
-            VStack(alignment: .leading, spacing: 4) {
-                songInfo(width: geo.size.width)
-                    .zIndex(1) // Ensure it draws above the waveform scrubber
-                musicSlider
-                    .zIndex(0)
-            }
+    /// The hover slots after the transport, and what «…» takes instead.
+    private var rowLayout: PlayerControlsLayout.Row {
+        let split = PlayerControlsLayout.split(
+            displayedSlots,
+            addingOutput: showMediaOutputControl,
+            addingLyrics: true
+        )
+        let extras = split.leading + split.trailing
+        guard besideNext else {
+            return PlayerControlsLayout.Row(buttons: extras, showsVolume: showPlayerVolumeRow, overflow: [])
         }
-        .padding(.top, 10)
-        .padding(.leading, 5)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        return PlayerControlsLayout.besideNext(extras, volume: showPlayerVolumeRow)
     }
 
     private func songInfo(width: CGFloat) -> some View {
-        VStack(alignment: .leading, spacing: 0) {
-            MusicTitleMarqueeView(
+        VStack(alignment: .leading, spacing: 4) {
+            // Hero 22, two lines at most, then a fade; never a marquee (§4.3).
+            HeroTitle(
                 text: musicManager.songTitle,
-                isExplicit: musicManager.isCurrentTrackExplicit,
-                font: .headline,
-                nsFont: .headline,
-                textColor: .white,
-                frameWidth: width,
-                badgeHeight: 14
+                width: width,
+                color: musicManager.isPlaying ? DSE.Palette.text : DSE.Palette.secondary(contrast)
             )
-            MarqueeText(
-                Binding(
-                    get: { musicManager.controlsNote ?? musicManager.artistName },
-                    set: { _ in }
-                ),
-                font: .headline,
-                nsFont: .headline,
-                textColor: Defaults[.playerColorTinting] ? Color(nsColor: musicManager.avgColor)
-                    .ensureMinimumBrightness(factor: 0.6) : DS.Palette.textSecondary,
-                frameWidth: width
-            )
-            .fontWeight(.medium)
-            // The one-line lyrics under the title, when the calendar takes the
+            HStack(spacing: 4) {
+                Text(verbatim: musicManager.controlsNote ?? musicManager.artistName)
+                    .eText(.body)
+                    .foregroundStyle(DSE.Palette.secondary(contrast))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                if musicManager.isCurrentTrackExplicit {
+                    Image(systemName: "e.square.fill")
+                        .font(DSE.Typeface.caption)
+                        .foregroundStyle(DSE.Palette.textTertiary)
+                        .accessibilityLabel(Text("Explicit"))
+                }
+            }
+            .frame(width: width, alignment: .leading)
+            // The one-line lyrics under the artist, when the calendar takes the
             // side where the lyrics panel would go (not in the compact island,
             // which has no calendar column).
             if enableLyrics && showCalendar && islandLayout != .compact {
@@ -538,88 +512,39 @@ struct MusicControlsView: View {
                     // during an intro there is no current line to blank out, so
                     // testing the text would miss it.
                     InstrumentalBreakNotes(fontSize: 10, weight: .regular)
-                        .foregroundStyle(DS.Palette.textSecondary)
-                    .padding(.top, 2)
+                        .foregroundStyle(DSE.Palette.textSecondary)
                     .transition(transition)
                 }
 
                 if !isInstrumentalBreak, !line.isEmpty {
-                    let lyricsBinding = Binding<String>(
-                        get: { musicManager.currentLyrics },
-                        set: { _ in }
-                    )
-
-                    MarqueeText(
-                        lyricsBinding,
-                        font: .system(size: 12, weight: .regular),
-                        nsFont: .headline,
-                        textColor: DS.Palette.textSecondary,
-                        minDuration: 0.35,
-                        frameWidth: width
-                    )
-                    .padding(.top, 2)
-                    .id(line)
-                    .transition(transition)
-                    .animation(.easeInOut(duration: 0.32), value: line)
+                    // E: no marquee; a long line ends at the column.
+                    Text(verbatim: line)
+                        .eText(.caption)
+                        .foregroundStyle(DSE.Palette.textSecondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                        .frame(width: width, alignment: .leading)
+                        .id(line)
+                        .transition(transition)
+                        .animation(.easeInOut(duration: 0.32), value: line)
                 }
             }
         }
     }
 
-    /// Whether the progress timeline should be paused (no ticks).
-    private var isProgressTimelinePaused: Bool {
-        !musicManager.isPlaying || musicManager.isLiveStream || musicManager.playbackRate <= 0
-    }
-
-    private var musicSlider: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: isProgressTimelinePaused)) { timeline in
-            MusicSliderView(
-                sliderValue: $sliderValue,
-                duration: $musicManager.songDuration,
-                lastDragged: $lastDragged,
-                color: musicManager.avgColor,
-                dragging: $dragging,
-                currentDate: timeline.date,
-                timestampDate: musicManager.timestampDate,
-                elapsedTime: musicManager.elapsedTime,
-                playbackRate: musicManager.playbackRate,
-                isPlaying: musicManager.isPlaying,
-                isLiveStream: musicManager.isLiveStream
-            ) { newValue in
-                guard !musicManager.isLiveStream else { return }
-                MusicManager.shared.seek(to: newValue)
-            }
-            .padding(.top, 5)
-            .frame(height: 36)
-        }
-        // A seek would reach the video that holds the controls.
-        .allowsHitTesting(musicManager.controlsTakenBy == nil)
-        .opacity(musicManager.controlsTakenBy == nil ? 1 : DS.heldControlsOpacity)
-    }
-
-    /// ⏮ ⏯ ⏭ always; shuffle, repeat, volume, output and lyrics on either
-    /// side only while the pointer is over the player (or one of their
-    /// popovers is open), so the player is calm otherwise.
+    /// ⏮ ⏯ ⏭ always, from the column's x 0, 8 apart; shuffle, repeat,
+    /// output, lyrics, favourite and volume after them, 10 on, only while the
+    /// pointer is over the player (or one of their popovers is open), so the
+    /// player is calm otherwise (VISUAL-E §2.5).
     private var playbackControls: some View {
         let split = PlayerControlsLayout.split(
             displayedSlots,
             addingOutput: showMediaOutputControl,
             addingLyrics: true
         )
+        let row = rowLayout
         let showsExtras = isPlayerHovered || vm.isMediaOutputPopoverActive
-        return HStack(spacing: 0) {
-            HStack(spacing: 2) {
-                ForEach(Array(split.leading.enumerated()), id: \.offset) { _, slot in
-                    slotView(for: slot)
-                }
-                if showPlayerVolumeRow {
-                    PlayerVolumeButton()
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .opacity(showsExtras ? 1 : 0)
-            .allowsHitTesting(showsExtras)
-
+        return HStack(spacing: 10) {
             HStack(spacing: 8) {
                 ForEach(Array(split.transport.enumerated()), id: \.offset) { _, slot in
                     slotView(for: slot)
@@ -627,18 +552,21 @@ struct MusicControlsView: View {
             }
             .disabled(musicManager.controlsTakenBy != nil)
             .opacity(musicManager.controlsTakenBy == nil ? 1 : DS.heldControlsOpacity)
-            .layoutPriority(1)
 
-            HStack(spacing: 2) {
-                ForEach(Array(split.trailing.enumerated()), id: \.offset) { _, slot in
+            HStack(spacing: 0) {
+                ForEach(Array(row.buttons.enumerated()), id: \.offset) { _, slot in
                     slotView(for: slot)
                 }
+                if row.showsVolume {
+                    PlayerVolumeButton()
+                }
             }
-            .frame(maxWidth: .infinity, alignment: .trailing)
             .opacity(showsExtras ? 1 : 0)
             .allowsHitTesting(showsExtras)
         }
-        .frame(maxWidth: .infinity, alignment: .center)
+        // Beside "Next" the row is ⏮ ⏯ ⏭ + ⤮ «Звук», exactly the 178 pt
+        // column; without "Next" the extras may run on into empty space.
+        .fixedSize()
         .animation(DS.hover, value: showsExtras)
     }
 
@@ -661,10 +589,11 @@ struct MusicControlsView: View {
     }
 
     private var controlHUDRow: some View {
-        HStack(alignment: .center, spacing: 10) {
+        HStack(alignment: .center, spacing: 8) {
             if !controlLeftIconName.isEmpty {
                 Image(systemName: controlLeftIconName)
-                    .font(.system(size: 16, weight: .semibold))
+                    .font(DSE.Typeface.glyphOpen)
+                    .foregroundStyle(DSE.Palette.text)
                     .frame(width: 22, height: 22, alignment: .center)
             }
 
@@ -672,7 +601,8 @@ struct MusicControlsView: View {
 
             if !controlRightIconName.isEmpty {
                 Image(systemName: controlRightIconName)
-                    .font(.system(size: 16, weight: .semibold))
+                    .font(DSE.Typeface.glyphOpen)
+                    .foregroundStyle(DSE.Palette.text)
                     .frame(width: 22, height: 22, alignment: .center)
             }
         }
@@ -702,10 +632,12 @@ struct MusicControlsView: View {
                     updateControlHUDValue(newValue)
                 },
                 thumbSize: 10,
-                restingTrackHeight: 4,
-                draggingTrackHeight: 7
+                // E: the line of light, 2 pt and 4 under the pointer (§2.10).
+                restingTrackHeight: DSE.Size.line,
+                draggingTrackHeight: DSE.Size.lineEngaged,
+                hitHeight: 22
             )
-            .frame(height: 7)
+            .frame(height: 22)
             Spacer(minLength: 0)
         }
         .frame(height: 22)
@@ -774,10 +706,6 @@ struct MusicControlsView: View {
         }
     }
 
-    private var brandAccentColor: Color {
-        musicManager.brandAccentColor
-    }
-
     private var repeatIcon: String {
         switch musicManager.repeatMode {
         case .off:
@@ -789,12 +717,13 @@ struct MusicControlsView: View {
         }
     }
 
-    private var repeatIconColor: Color {
+    /// E: an "on" control is white; colour never paints a glyph (§2.5).
+    private var repeatIconColor: Color? {
         switch musicManager.repeatMode {
         case .off:
-            return .white
+            return nil
         case .all, .one:
-            return brandAccentColor
+            return DSE.Palette.text
         }
     }
 
@@ -820,6 +749,7 @@ struct MusicControlsView: View {
         case .playPause:
             HoverButton(
                 icon: musicManager.isPlaying ? (musicManager.isLiveStream ? "stop.fill" : "pause.fill") : "play.fill",
+                iconColor: DSE.Palette.text,
                 scale: .large
             ) {
                 MusicManager.shared.togglePlay()
@@ -861,7 +791,7 @@ struct MusicControlsView: View {
         case .shuffle:
             HoverButton(
                 icon: "shuffle",
-                iconColor: musicManager.isShuffled ? brandAccentColor : .white,
+                iconColor: musicManager.isShuffled ? DSE.Palette.text : nil,
                 scale: .medium
             ) {
                 MusicManager.shared.toggleShuffle()
@@ -881,7 +811,7 @@ struct MusicControlsView: View {
         case .lyrics:
             HoverButton(
                 icon: enableLyrics ? "quote.bubble.fill" : "quote.bubble",
-                iconColor: enableLyrics ? brandAccentColor : .white,
+                iconColor: enableLyrics ? DSE.Palette.text : nil,
                 scale: .medium
             ) {
                 LyricsConsent.toggle()
@@ -890,7 +820,7 @@ struct MusicControlsView: View {
             LikeTrackControl { presentation, toggle in
                 HoverButton(
                     icon: presentation.iconName,
-                    iconColor: presentation.isActive ? brandAccentColor : .white,
+                    iconColor: presentation.isActive ? DSE.Palette.text : nil,
                     scale: .medium
                 ) {
                     toggle()
@@ -1052,29 +982,93 @@ struct NotchHomeView: View {
                         action: { SettingsWindowController.shared.showWindow() }
                     )
                 case .player, .nothing:
-                    HStack(alignment: .top, spacing: SideLyricsLayout.hStackSpacing) {
+                    // E (VISUAL-E §3): the cover and its text column, then
+                    // "Next" as a 240 pt line of time whose hairline sits 12
+                    // after the column.
+                    HStack(alignment: .top, spacing: 12) {
                         if shouldShowMusicPlayer {
-                            MusicPlayerView(albumArtNamespace: albumArtNamespace)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .layoutPriority(1)
+                            // Not raised over "Next": nothing of the player
+                            // draws into its column.
+                            MusicPlayerView(
+                                albumArtNamespace: albumArtNamespace,
+                                besideNext: nowLayout.showsNext(deferralDone: showCalendarDeferred)
+                            )
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .layoutPriority(1)
                         }
 
                         if nowLayout.showsNext(deferralDone: showCalendarDeferred) {
                             NextEventsCard()
-                                .frame(minWidth: 180, idealWidth: 220, maxWidth: 240)
+                                .frame(width: shouldShowMusicPlayer ? 240 : nil)
                         }
 
                         if mirrorIsVisible && islandLayout != .compact {
                             cameraPreview
                         }
                     }
+                    // The island keeps its full height, so the seek is its edge.
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 }
             }
         }
         .transition(.opacity.animation(.smooth.speed(0.9))
             .combined(with: .move(edge: .top)))
         .blur(radius: vm.notchState == .closed ? 30 : 0)
-        .padding(8) // The home view's main padding
+        // The home view's main padding. E starts the content right under the
+        // header (frame y 40); the compact island keeps its 8.
+        .padding(.horizontal, 8)
+        .padding(.bottom, 8)
+        .padding(.top, islandLayout == .compact ? 8 : 0)
+        .overlay(alignment: .bottom) {
+            if showsSeekEdge {
+                seekEdge
+                    .padding(.horizontal, 8)
+                    // The island's own bottom edge: 12 below this view.
+                    .offset(y: Self.islandBottomInset)
+            }
+        }
+    }
+
+    /// What lies between this view and the island's bottom edge (the open
+    /// island's bottom padding in ContentView).
+    private static let islandBottomInset: CGFloat = 12
+
+    /// The full player is on the tab; the compact row draws its own seek.
+    private var showsSeekEdge: Bool {
+        guard shouldShowMusicPlayer, !(islandLayout == .compact) else { return false }
+        if shouldShowSideLyrics { return true }
+        if case .player = nowLayout { return true }
+        return false
+    }
+
+    /// No tick while paused, stopped or live: the edge is drawn once.
+    private var isProgressTimelinePaused: Bool {
+        !musicManager.isPlaying || musicManager.isLiveStream || musicManager.playbackRate <= 0
+    }
+
+    /// The seek is the island's bottom edge (VISUAL-E §2.4, R6). It steps
+    /// once a second only while open and playing (this view exists only
+    /// while open); otherwise nothing ticks. One timeline in every state, so
+    /// play, pause and rate changes keep the edge's scrub and drop state.
+    private var seekEdge: some View {
+        TimelineView(.animation(minimumInterval: 1, paused: isProgressTimelinePaused)) { timeline in
+            // A paused timeline keeps its last date; never read before the
+            // player's own latest report.
+            seekEdge(at: max(timeline.date, musicManager.timestampDate))
+        }
+    }
+
+    private func seekEdge(at date: Date) -> some View {
+        let duration = musicManager.songDuration
+        let position = musicManager.estimatedPlaybackPosition(at: date)
+        return SeekEdge(
+            progress: duration > 0 ? position / duration : 0,
+            duration: duration,
+            // A seek would reach the video that holds the controls.
+            isEnabled: musicManager.controlsTakenBy == nil,
+            liveLabel: musicManager.isLiveStream ? String(localized: "LIVE") : nil,
+            onSeek: { MusicManager.shared.seek(to: $0) }
+        )
     }
 
     private var sideLyricsContent: some View {
@@ -1106,6 +1100,99 @@ struct NotchHomeView: View {
             .blur(radius: vm.notchState == .closed ? 20 : 0)
     }
 
+}
+
+/// The track title as the player's hero (VISUAL-E §1.4 `hero`, §4.3): 22 pt
+/// semibold, up to two lines. A title longer than that runs on in the second
+/// line, which ends in a 10 pt fade at the column's edge: never «…», never a
+/// marquee. The tooltip holds the full title.
+struct HeroTitle: View {
+    let text: String
+    let width: CGFloat
+    var color: Color = DSE.Palette.text
+
+    static let lineHeight: CGFloat = 26
+    private static let fade: CGFloat = 10
+
+    var body: some View {
+        let lines = HeroTitleLines.split(text, width: width)
+        VStack(alignment: .leading, spacing: 0) {
+            line(lines.first, fades: lines.rest == nil && lines.firstOverflows)
+            if let rest = lines.rest {
+                line(rest, fades: lines.restOverflows)
+            }
+        }
+        .foregroundStyle(color)
+        .frame(width: max(width, 0), alignment: .leading)
+        .help(text)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(Text(verbatim: text))
+    }
+
+    private func line(_ string: String, fades: Bool) -> some View {
+        Text(verbatim: string)
+            .eText(.hero)
+            .lineLimit(1)
+            .fixedSize()
+            .frame(width: max(width, 0), height: Self.lineHeight, alignment: .leading)
+            .clipped()
+            .mask {
+                if fades {
+                    HStack(spacing: 0) {
+                        Rectangle()
+                        LinearGradient(colors: [.black, .clear], startPoint: .leading, endPoint: .trailing)
+                            .frame(width: Self.fade)
+                    }
+                } else {
+                    Rectangle()
+                }
+            }
+    }
+}
+
+/// Where the hero title breaks: the words that fit the first line, and the
+/// rest on one second line (which fades if it is longer than the column).
+enum HeroTitleLines {
+    struct Lines: Equatable {
+        var first: String
+        var rest: String?
+        var firstOverflows = false
+        var restOverflows = false
+    }
+
+    private static let font = NSFont.systemFont(ofSize: 22, weight: .semibold)
+    /// One entry: the title changes once per track, not per frame.
+    private static var cache: (key: String, width: CGFloat, lines: Lines)?
+
+    static func width(of string: String) -> CGFloat {
+        ceil((string as NSString).size(withAttributes: [.font: font, .kern: -0.5]).width)
+    }
+
+    static func split(_ text: String, width: CGFloat) -> Lines {
+        if let cache, cache.key == text, cache.width == width { return cache.lines }
+        let lines = compute(text, width: width)
+        cache = (text, width, lines)
+        return lines
+    }
+
+    private static func compute(_ text: String, width: CGFloat) -> Lines {
+        let title = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard width > 0, self.width(of: title) > width else { return Lines(first: title) }
+        let words = title.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
+        var first = ""
+        var used = 0
+        for word in words {
+            let candidate = first.isEmpty ? word : first + " " + word
+            guard self.width(of: candidate) <= width else { break }
+            first = candidate
+            used += 1
+        }
+        // A first word wider than the column: one line, faded.
+        guard used > 0 else { return Lines(first: title, firstOverflows: true) }
+        let rest = words.dropFirst(used).joined(separator: " ")
+        guard !rest.isEmpty else { return Lines(first: first) }
+        return Lines(first: first, rest: rest, restOverflows: self.width(of: rest) > width)
+    }
 }
 
 struct MusicSliderView: View {
@@ -1521,7 +1608,7 @@ struct PlayerVolumeButton: View {
     var body: some View {
         HoverButton(
             icon: volumeModel.isMuted || volumeModel.level <= 0.001 ? "speaker.slash.fill" : "speaker.wave.2.fill",
-            iconColor: .white,
+            iconColor: isPopoverPresented ? DSE.Palette.text : nil,
             scale: .medium
         ) {
             isPopoverPresented.toggle()
@@ -1617,7 +1704,7 @@ private struct MediaOutputPickerButton: View {
     @EnvironmentObject private var vm: DynamicIslandViewModel
 
     var body: some View {
-        HoverButton(icon: buttonIcon, iconColor: .white, scale: .medium) {
+        HoverButton(icon: buttonIcon, iconColor: isPopoverPresented ? DSE.Palette.text : nil, scale: .medium) {
             isPopoverPresented.toggle()
             if isPopoverPresented {
                 routeManager.refreshDevices()
@@ -1679,10 +1766,10 @@ private struct AirPlayPickerButton: View {
     }
 
     var body: some View {
-        HoverButton(icon: "airplayaudio", iconColor: .white, scale: .medium) {
+        HoverButton(icon: "airplayaudio", iconColor: isPopoverPresented ? DSE.Palette.text : nil, scale: .medium) {
             isPopoverPresented.toggle()
             if isPopoverPresented {
-                Task { await airPlayManager.refreshDevices() }
+                Task { await airPlayManager.refreshDevices(afterClick: true) }
             }
         }
         .accessibilityLabel("AirPlay")

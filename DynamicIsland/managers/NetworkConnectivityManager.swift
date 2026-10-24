@@ -9,6 +9,7 @@
  */
 
 import AppKit
+import Combine
 import CoreWLAN
 import Foundation
 import Network
@@ -40,7 +41,11 @@ final class NetworkConnectivityManager: NSObject, ObservableObject, CWEventDeleg
 
     @Published private(set) var hudState: ConnectivityHUDState = .hidden
 
-    private let pathMonitor = NWPathMonitor()
+    /// A cancelled monitor cannot start again, so each resume makes one.
+    private var pathMonitor: NWPathMonitor?
+    /// Watching while someone is at the Mac; paused otherwise.
+    private var isObserving = false
+    private var gateCancellable: AnyCancellable?
     private let monitorQueue = DispatchQueue(label: "com.atoll.network-connectivity", qos: .utility)
     private let wiFiClient = CWWiFiClient.shared()
 
@@ -63,6 +68,36 @@ final class NetworkConnectivityManager: NSObject, ObservableObject, CWEventDeleg
         guard !hasStarted else { return }
         hasStarted = true
 
+        // Asleep, locked or screen off: no route watch at all. Every dark
+        // wake changes the route, and each change asked `networksetup` for
+        // the network name and raised a Wi-Fi HUD that resized the island,
+        // with nobody there. Back at the Mac, the first route counts as the
+        // starting one, so coming back shows nothing either.
+        gateCancellable = ActivityGate.shared.publisher(for: .userPresent)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] present in
+                guard let self, self.hasStarted else { return }
+                if present {
+                    self.beginObserving()
+                } else {
+                    self.endObserving()
+                }
+            }
+    }
+
+    func stopMonitoring() {
+        guard hasStarted else { return }
+        hasStarted = false
+        gateCancellable = nil
+        endObserving()
+    }
+
+    private func beginObserving() {
+        guard !isObserving else { return }
+        isObserving = true
+        hasReceivedInitialPath = false
+
+        let pathMonitor = NWPathMonitor()
         pathMonitor.pathUpdateHandler = { [weak self] path in
             guard let self else { return }
             let isSatisfied = path.status == .satisfied
@@ -87,17 +122,20 @@ final class NetworkConnectivityManager: NSObject, ObservableObject, CWEventDeleg
         try? wiFiClient.startMonitoringEvent(with: .ssidDidChange)
         try? wiFiClient.startMonitoringEvent(with: .linkDidChange)
         pathMonitor.start(queue: monitorQueue)
+        self.pathMonitor = pathMonitor
     }
 
-    func stopMonitoring() {
-        guard hasStarted else { return }
-        hasStarted = false
-        pathMonitor.cancel()
+    private func endObserving() {
+        guard isObserving else { return }
+        isObserving = false
+        pathMonitor?.cancel()
+        pathMonitor = nil
         try? wiFiClient.stopMonitoringEvent(with: .ssidDidChange)
         try? wiFiClient.stopMonitoringEvent(with: .linkDidChange)
         wiFiClient.delegate = nil
         hideWorkItem?.cancel()
         hideWorkItem = nil
+        hudState = .hidden
     }
 
     func dismissNoConnection() {

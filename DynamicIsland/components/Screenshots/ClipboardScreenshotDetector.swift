@@ -91,3 +91,15 @@ enum ClipboardScreenshotDetector {
         Defaults[.enableScreenshotShelf] && Defaults[.collectClipboardScreenshots]
     }
 }
+
+/// To the person, screenshots are one feature: saved to a file or taken to
+/// the clipboard, they gather in the same batches (owner, 22.10: «временных
+/// скринов нету, а они самые важные»). The keys stay separate, so Settings
+/// can still offer the clipboard part on its own, but the «Скриншоты» switch
+/// of the onboarding and of Settings turns both on or off.
+enum ScreenshotFeature {
+    static func setEnabled(_ on: Bool) {
+        Defaults[.enableScreenshotShelf] = on
+        Defaults[.collectClipboardScreenshots] = on
+    }
+}

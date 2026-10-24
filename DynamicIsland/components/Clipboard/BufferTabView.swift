@@ -21,8 +21,12 @@ import Defaults
 import SwiftUI
 
 /// The Clipboard tab, now with the screenshots in it (docs/PLAN-DESIGN.md
-/// §3.4): the latest screenshot batch on top with "Paste into … · N", then
-/// the copies, with the segments All · Screenshots · Text · Links · Files.
+/// §3.4). Buffer v3 (docs/design/mockups/E/Buffer-v3.dc.html): no plate
+/// anywhere. First the filters as words — ВСЕ · СНИМКИ · ТЕКСТ · ССЫЛКИ ·
+/// ФАЙЛЫ — with the pinned count, search and pause on the right, over a
+/// hairline; then, in «Все», the latest batch as a film with its action row
+/// and the one lit key «Вставить в Claude · N»; then the copies as two
+/// columns of numbered rows.
 struct BufferTabView: View {
     @EnvironmentObject var vm: DynamicIslandViewModel
     @ObservedObject private var state = BufferTabState.shared
@@ -35,11 +39,15 @@ struct BufferTabView: View {
     @Default(.clipboardDisplayMode) private var clipboardMode
     @Default(.clipboardHistoryPaused) private var paused
     @Default(.screenshotThumbnailSize) private var thumbnailWidth
-    @State private var searching = false
-    @State private var showClearAlert = false
-    @State private var menuShown = false
-    @State private var alertToken = UUID()
+    @State private var typesShown = false
+    @State private var typesToken = UUID()
     @State private var trashToken = UUID()
+    @State private var folderToken = UUID()
+    /// «Сохранять в ~/Screenshots» asks first, as in Settings: it changes a
+    /// macOS setting and restarts the menu bar for a moment.
+    @State private var confirmsShotsFolder = false
+    @FocusState private var searchFocused: Bool
+    @Environment(\.colorSchemeContrast) private var contrast
 
     private var available: [BufferSegment] {
         BufferSegment.available(clipboard: clipboardOn && clipboardMode == .notchTab, screenshots: screenshotsOn)
@@ -49,44 +57,98 @@ struct BufferTabView: View {
         BufferSegment.resolve(state.segment, available: available)
     }
 
+    /// What the trash would take on the filter shown.
+    private var clearableCount: Int {
+        BufferTabState.clearableCount(segment, history: clipboard.clipboardHistory, shownShots: screenshotsOn ? screenshots.shownItemIDs.count : 0)
+    }
+
+    /// The latest batch while it sits on top of the copies.
+    private var latestBatch: ScreenshotBatch? {
+        guard let batch = screenshots.store.batches.first, let segment,
+              BufferLayout.showsBatchStrip(segment: segment, lastAddedAt: batch.lastAddedAt, now: Date())
+        else { return nil }
+        return batch
+    }
+
+    /// Toasts come and go by opacity (M10).
+    static let fade = Animation.easeOut(duration: 0.2)
+
+    private var searching: Bool { state.searching }
+
     var body: some View {
         if presentation.isHidingContent {
-            PresentingPlaceholder(title: NotchTab.clipboard.title, icon: NotchTab.clipboard.icon)
+            // One grey line; the tabs and «…» stay (Buffer v3, state 12).
+            VStack(spacing: 0) {
+                NoticeRow(
+                    symbol: "eye.slash",
+                    title: String(localized: "Hidden while your screen is shared or recorded."),
+                    centered: true
+                )
+                .padding(.top, 8)
+                BufferSlackFiller()
+            }
+            .padding(.horizontal, Self.inset)
+            .modifier(BufferTabFrame())
+            .onPreferenceChange(BufferSlackKey.self) { slack in
+                MainActor.assumeIsolated { state.fit(slack: slack) }
+            }
         } else {
-            VStack(alignment: .leading, spacing: 8) {
-                if let batch = screenshots.store.batches.first, let segment,
-                   BufferLayout.showsBatchStrip(segment: segment, lastAddedAt: batch.lastAddedAt, now: Date()) {
-                    LatestBatchStrip(batch: batch, quickLook: quickLook)
-                }
+            let batch = latestBatch
+            VStack(alignment: .leading, spacing: 0) {
                 if available.count > 1 {
-                    segmentsRow
+                    filterRow
+                    Hairline()
+                        .padding(.top, 6)
+                        .padding(.bottom, 6)
                 }
-                content
+                if let batch {
+                    LatestBatchStrip(batch: batch, quickLook: quickLook) { choose(.screenshots) }
+                        .padding(.bottom, 16)
+                }
+                content(batch: batch)
             }
             .onPreferenceChange(BufferSlackKey.self) { slack in
                 MainActor.assumeIsolated { state.fit(slack: slack) }
             }
-            .padding(.horizontal, 12)
-            .padding(.top, 2)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-            .overlay(alignment: .bottom) {
-                if let toast = state.toast {
-                    DSToastView(text: toast, tone: state.toastIsWarning ? .warning : .done)
-                        .padding(.bottom, 10)
-                        .transition(.move(edge: .bottom).combined(with: .opacity))
+            // Gone files and a moved folder are looked for when the tab is
+            // looked at, not on a timer.
+            .onAppear { screenshots.refreshOnLook() }
+            .padding(.horizontal, Self.inset)
+            .padding(.top, 6)
+            .modifier(BufferTabFrame())
+            // With the batch on top, its action row shows a short toast
+            // (VISUAL-E §2.9); a warning, and any toast without the batch,
+            // is one capsule over the content (Q24), two lines when long.
+            // The history's «Отменить» rides a capsule too when the history
+            // is not on screen (moved to «Снимки» during the offer).
+            .overlay(alignment: .top) {
+                VStack(spacing: 6) {
+                    if BufferLayout.clearedUndoNeedsCapsule(segment: segment, undo: state.undo?.kind), let undo = state.undo {
+                        ToastCapsule(
+                            symbol: "trash",
+                            message: BufferUndo.clearedMessage(undo.count),
+                            actionTitle: String(localized: "Undo"),
+                            action: { state.undoRemoval() }
+                        )
+                        .transition(.opacity)
+                    }
+                    if let toast = state.toast, batch == nil || state.toastIsWarning {
+                        ToastCapsule(
+                            symbol: state.toastIsWarning ? "exclamationmark.circle" : "checkmark",
+                            tint: state.toastIsWarning ? DS.Palette.attention : DSE.Palette.text,
+                            message: toast,
+                            lineLimit: 2
+                        )
+                        .help(toast)
+                        .transition(.opacity)
+                    }
                 }
+                .padding(.top, 34)
             }
-            .animation(DS.spring, value: state.toast)
+            .animation(Self.fade, value: state.toast)
+            .animation(Self.fade, value: state.undo?.id)
             .quickLookPresenter(using: quickLook)
-            .alert("Clear Clipboard History?", isPresented: $showClearAlert) {
-                Button("Clear History", role: .destructive) { clipboard.clearHistory() }
-                Button("Cancel", role: .cancel) {}
-            } message: {
-                Text("This removes every recent clipboard item. Pinned items stay.")
-            }
-            .onChange(of: showClearAlert) { _, shown in
-                vm.setAutoCloseSuppression(shown, token: alertToken)
-            }
+            // Files are not history: the Trash keeps its question (board, row 41).
             .alert("Move to the Trash?", isPresented: Binding(
                 get: { screenshots.pendingRemoval != nil },
                 set: { if !$0 { screenshots.pendingRemoval = nil } }
@@ -99,137 +161,296 @@ struct BufferTabView: View {
             .onChange(of: screenshots.pendingRemoval) { _, pending in
                 vm.setAutoCloseSuppression(pending != nil, token: trashToken)
             }
+            .alert("Save screenshots to ~/Screenshots?", isPresented: $confirmsShotsFolder) {
+                Button("Use ~/Screenshots") { screenshots.useRecommendedFolder() }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text(String(format: String(localized: "This creates %@, tells macOS to save screenshots there and restarts the menu bar for a moment. Existing screenshots are not moved."),
+                            ScreenshotLocation.recommendedFolder().path))
+            }
+            .onChange(of: confirmsShotsFolder) { _, shown in
+                vm.setAutoCloseSuppression(shown, token: folderToken)
+            }
+            .onChange(of: typesShown) { _, shown in
+                vm.setAutoCloseSuppression(shown, token: typesToken)
+            }
+            .onDisappear {
+                vm.setAutoCloseSuppression(false, token: typesToken)
+                vm.setAutoCloseSuppression(false, token: folderToken)
+                // The island closed (↩ pasted the first find, say) or the tab
+                // changed: no query is left to filter the next opening.
+                state.tabDisappeared()
+            }
         }
     }
 
-    // MARK: Segments, search, pause, "…"
+    /// The content's inset: with the island's own 14 it starts under the
+    /// first tab word.
+    static let inset: CGFloat = DS.Space.s
 
-    private var segmentsRow: some View {
-        HStack(spacing: 8) {
+    /// A click on Screenshots is the person asking for them: only then is
+    /// their folder looked at, on a fresh install (§5.8). Not when the tab
+    /// merely shows that segment: with the clipboard off it is the only one,
+    /// and a hover over the island would have brought up the macOS prompt.
+    private func choose(_ chosen: BufferSegment) {
+        state.segment = chosen
+        if chosen == .screenshots { screenshots.startOnFirstUse() }
+    }
+
+    // MARK: Filters, pinned, search, pause, thumbnail size
+
+    /// The first content row: the filters as words (or the search field in
+    /// their place) and, on the right, the pinned count, the magnifier and
+    /// pause — in «Снимки» the thumbnail size instead of pins and search.
+    private var filterRow: some View {
+        HStack(spacing: 4) {
             if searching {
                 searchField
             } else {
-                DSSegmented(
-                    options: available.map { (value: $0, title: $0.title) },
-                    selection: Binding(get: { segment ?? .all }, set: { state.segment = $0 })
-                )
-                .fixedSize()
+                FilterWords<BufferSegment>(
+                    items: available.map { FilterWords<BufferSegment>.Item(id: $0, title: $0.title) },
+                    selection: segment
+                ) { choose($0) }
+                Spacer(minLength: 8)
             }
-            Spacer(minLength: 4)
             if segment == .screenshots {
-                Slider(value: $thumbnailWidth, in: 70...200)
-                    .controlSize(.mini)
-                    .frame(width: 80)
-                    .help(String(localized: "Thumbnail size"))
-                    .accessibilityLabel(Text("Thumbnail size"))
+                Image(systemName: "photo")
+                    .font(.system(size: 11))
+                    .foregroundStyle(DSE.Palette.tertiary(contrast))
+                    .accessibilityHidden(true)
+                StepLine(
+                    steps: ScreenshotGridLayout.sizeSteps.count,
+                    selected: ScreenshotGridLayout.sizeStep(for: thumbnailWidth),
+                    label: String(localized: "Thumbnail size")
+                ) { step in
+                    thumbnailWidth = ScreenshotGridLayout.sizeSteps[step]
+                }
+                .padding(.trailing, 4)
             } else if clipboardOn {
-                DSIconButton(symbol: "magnifyingglass", label: String(localized: "Search"), isSelected: searching) {
-                    withAnimation(DS.spring) {
-                        searching.toggle()
-                        if !searching { state.query = "" }
+                pinnedToggle
+                if !searching {
+                    GlyphButton(symbol: "magnifyingglass", label: String(localized: "Search"),
+                                font: Self.glyph, box: Self.glyphBox) {
+                        openSearch()
                     }
                 }
-                DSIconButton(
+            }
+            // The trash: what the filter shows goes, with «Отменить» (23.10).
+            // Not while searching: it would take the whole filter, not the finds.
+            if clearableCount > 0, !presentation.isHidingContent, !searching, let segment {
+                GlyphButton(symbol: "trash", label: String(localized: "Clear"), font: Self.glyph, box: Self.glyphBox) {
+                    state.clear(segment)
+                }
+            }
+            if clipboardOn {
+                GlyphButton(
                     symbol: paused ? "play.fill" : "pause.fill",
                     label: paused ? String(localized: "Resume clipboard history") : String(localized: "Pause clipboard history"),
+                    font: Self.glyph, box: Self.glyphBox,
                     tint: paused ? DS.Palette.paused : nil
                 ) {
                     paused.toggle()
                 }
-                DSIconButton(symbol: "ellipsis", label: String(localized: "More"), isSelected: menuShown) {
-                    menuShown.toggle()
-                }
-                .popover(isPresented: $menuShown, arrowEdge: .bottom) {
-                    VStack(spacing: 2) {
-                        MoreMenuRow(symbol: "trash", title: String(localized: "Clear History…"), trailing: nil,
-                                    trailingTint: DS.Palette.textTertiary, opensPanel: false) {
-                            menuShown = false
-                            showClearAlert = true
-                        }
-                        MoreMenuRow(symbol: "gearshape", title: String(localized: "Clipboard Settings…"), trailing: nil,
-                                    trailingTint: DS.Palette.textTertiary, opensPanel: false) {
-                            menuShown = false
-                            SettingsWindowController.shared.showWindow()
-                        }
-                    }
-                    .padding(6)
-                    .frame(width: 240)
-                }
-                .onChange(of: menuShown) { _, shown in
-                    vm.setAutoCloseSuppression(shown, token: alertToken)
-                }
             }
         }
-        .frame(height: 30)
+        .frame(height: Self.glyphBox)
+        // «Снимки» has no search: the field closes when the filter moves there.
+        .onChange(of: segment) { _, now in
+            if now == .screenshots && searching { closeSearch() }
+        }
     }
 
+    static let glyph = Font.system(size: 12, weight: .medium)
+    static let glyphBox: CGFloat = 22
+
+    /// The pin with the number of pinned entries: a click shows or folds
+    /// them over «Недавнее»; white while they show. Not there while nothing
+    /// is pinned.
+    @ViewBuilder
+    private var pinnedToggle: some View {
+        if !clipboard.pinnedItems.isEmpty {
+            let open = state.showsPinned || !state.query.isEmpty
+            let count = ClipboardFiltering.apply(clipboard.pinnedItems, filter: segment?.clipboardFilter ?? .all, query: state.query).count
+            Button {
+                withAnimation(DS.spring) { state.showsPinned.toggle() }
+            } label: {
+                HStack(spacing: 3) {
+                    Image(systemName: open ? "pin.fill" : "pin")
+                        .font(.system(size: 11, weight: .medium))
+                    Text(verbatim: "\(count)")
+                        .eText(.time)
+                }
+                .foregroundStyle(open ? DSE.Palette.text : DSE.Palette.secondary(contrast))
+                .padding(.horizontal, 4)
+                .frame(height: Self.glyphBox)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(PressDimStyle())
+            .help(open ? String(localized: "Hide pinned") : String(localized: "Show pinned"))
+            .accessibilityLabel(Text(open ? "Hide pinned" : "Show pinned"))
+            .accessibilityValue(Text(verbatim: "\(count)"))
+        }
+    }
+
+    private func openSearch() {
+        withAnimation(DS.spring) { state.openSearch() }
+        DispatchQueue.main.async { searchFocused = true }
+    }
+
+    private func closeSearch() {
+        withAnimation(DS.spring) { state.closeSearch() }
+    }
+
+    /// The field takes the words' place, on the same hairline, no capsule:
+    /// the magnifier, the query, the type as a word («Все типы ˅», changed
+    /// without leaving the search) and ×, which clears the query or, empty,
+    /// closes the field. Esc closes it too; Return pastes the first find.
     private var searchField: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 8) {
             Image(systemName: "magnifyingglass")
-                .font(.system(size: 11))
-                .foregroundStyle(DS.Palette.textTertiary)
+                .font(Self.glyph)
+                .foregroundStyle(DSE.Palette.tertiary(contrast))
+                .accessibilityHidden(true)
             TextField(String(localized: "Search"), text: $state.query)
                 .textFieldStyle(.plain)
-                .font(DS.Typeface.body)
-                .foregroundStyle(DS.Palette.text)
-            if !state.query.isEmpty {
-                Button { state.query = "" } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 11))
-                        .foregroundStyle(DS.Palette.textTertiary)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel(Text("Clear search"))
+                .font(DSE.Typeface.body)
+                .foregroundStyle(DSE.Palette.text)
+                .focused($searchFocused)
+                .onSubmit { state.submitSearch(plainText: NSEvent.modifierFlags.contains(.shift)) }
+                .onExitCommand { closeSearch() }
+            typePicker
+            GlyphButton(symbol: "xmark", label: String(localized: "Clear search"),
+                        font: Self.glyph, box: Self.glyphBox) {
+                if state.query.isEmpty { closeSearch() } else { state.query = "" }
             }
         }
-        .padding(.horizontal, 10)
-        .frame(height: 26)
-        .frame(maxWidth: 260)
-        .background(Capsule().fill(DS.Palette.card))
+        .frame(maxWidth: .infinity)
+    }
+
+    /// The filters while searching: «Все типы», «Текст», «Ссылки», «Файлы».
+    private var typePicker: some View {
+        let types = available.filter { $0 != .screenshots }
+        let current = segment ?? .all
+        return Button {
+            typesShown.toggle()
+        } label: {
+            HStack(spacing: 4) {
+                Text(current == .all ? String(localized: "All types") : current.title)
+                    .eText(.caption)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 8, weight: .semibold))
+            }
+            .foregroundStyle(typesShown ? DSE.Palette.text : DSE.Palette.secondary(contrast))
+            .frame(height: Self.glyphBox)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(PressDimStyle())
+        .fixedSize()
+        .popover(isPresented: $typesShown, arrowEdge: .bottom) {
+            VStack(spacing: 0) {
+                ForEach(types) { type in
+                    MoreMenuRow(
+                        title: type == .all ? String(localized: "All types") : type.title,
+                        trailing: type == current ? "✓" : nil,
+                        opensPanel: false
+                    ) {
+                        typesShown = false
+                        choose(type)
+                    }
+                }
+            }
+            .padding(4)
+            .frame(width: 200)
+            .background(DSE.Palette.island)
+            .presentationBackground(DSE.Palette.island)
+        }
     }
 
     // MARK: Content
 
     @ViewBuilder
-    private var content: some View {
+    private func content(batch: ScreenshotBatch?) -> some View {
         switch segment {
         case .screenshots:
             screenshotsContent
         case .none:
             VStack(spacing: 0) {
-                DSEmptyState(
+                NoticeRow(
                     symbol: "doc.on.clipboard",
                     title: String(localized: "Clipboard is off"),
                     message: String(localized: "Turn on the clipboard or screenshot collecting in Settings."),
-                    inline: true
+                    centered: true
                 )
+                .padding(.top, 8)
                 BufferSlackFiller()
             }
         default:
-            NotchClipboardView(embedded: true)
+            NotchClipboardView(embedded: true, onOtherKey: otherKeys(batch: batch))
+        }
+    }
+
+    /// The latest batch's keys (space, ⌘A, ⌘C, Delete) work in «Все» as soon
+    /// as the island opens with a shortcut, before a frame is clicked.
+    private func otherKeys(batch: ScreenshotBatch?) -> ((NSEvent) -> Bool)? {
+        guard let batch else { return nil }
+        let quickLook = quickLook
+        return { event in
+            guard let command = ScreenshotGridCommand(event: event), command != .clearSelection else { return false }
+            if command == .removeSelected, ScreenshotShelfManager.shared.selectedCount(in: batch) == 0 { return false }
+            LatestBatchStrip.run(command, batch: batch, quickLook: quickLook)
+            return true
         }
     }
 
     @ViewBuilder
     private var screenshotsContent: some View {
         if !screenshots.canReadFolder {
-            VStack(spacing: 0) {
-                DSEmptyState(
-                    symbol: "lock",
-                    title: String(localized: "No access to the screenshot folder"),
-                    message: String(localized: "macOS keeps Skerry out of this folder. Choose ~/Screenshots in Screenshots settings, or allow access in System Settings."),
-                    inline: true
-                )
-                BufferSlackFiller()
+            VStack(alignment: .leading, spacing: 0) {
+                HStack(spacing: 4) {
+                    NoticeRow(
+                        symbol: "lock",
+                        title: String(localized: "No access to the screenshot folder"),
+                        message: String(format: String(localized: "needs access to the “%@” folder"),
+                                        FileManager.default.displayName(atPath: screenshots.folder.path)),
+                        actionTitle: String(localized: "Allow…"),
+                        action: openFolderPrivacySettings
+                    )
+                    // The other way out: a folder macOS does not guard.
+                    if screenshots.folder.standardizedFileURL != ScreenshotLocation.recommendedFolder().standardizedFileURL {
+                        Button {
+                            confirmsShotsFolder = true
+                        } label: {
+                            Text("Save to ~/Screenshots")
+                                .eText(.caption)
+                                .foregroundStyle(DSE.Palette.secondary(contrast))
+                                .underline()
+                                .lineLimit(1)
+                                .fixedSize()
+                                .padding(.horizontal, 4)
+                                .frame(height: DSE.Size.key)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(PressDimStyle())
+                        .help(String(localized: "Save screenshots to ~/Screenshots?"))
+                    }
+                }
+                .help(String(localized: "macOS keeps Skerry out of this folder. Choose ~/Screenshots in Screenshots settings, or allow access in System Settings."))
+                Hairline()
+                if ScreenshotBatchPanel.visibleBatches(screenshots.store.batches, onlyClipboardShots: true).isEmpty {
+                    noScreenshotsYet.padding(.top, 8)
+                    BufferSlackFiller()
+                } else {
+                    // Clipboard screenshots need no folder: their batches
+                    // show under the notice (they were hidden behind it).
+                    // Saved ones stay out: without access they are blank.
+                    ScreenshotBatchPanel(quickLook: quickLook, onlyClipboardShots: true)
+                        .padding(.top, 8)
+                        .preference(key: BufferSlackKey.self, value: BufferFit.wantsAllRoom)
+                }
             }
         } else if screenshots.store.isEmpty {
             VStack(spacing: 0) {
-                DSEmptyState(
-                    symbol: "camera.viewfinder",
-                    title: String(localized: "No screenshots yet"),
-                    message: String(localized: "New screenshots (⇧⌘3, ⇧⌘4, ⇧⌘5) gather here in batches."),
-                    inline: true
-                )
+                noScreenshotsYet.padding(.top, 8)
                 BufferSlackFiller()
             }
         } else {
@@ -237,83 +458,91 @@ struct BufferTabView: View {
                 .preference(key: BufferSlackKey.self, value: BufferFit.wantsAllRoom)
         }
     }
+
+    private var noScreenshotsYet: some View {
+        NoticeRow(
+            symbol: "camera.viewfinder",
+            title: String(localized: "No screenshots yet"),
+            message: String(localized: "New screenshots (⇧⌘3, ⇧⌘4, ⇧⌘5, ⌃⇧⌘4) gather here in batches."),
+            centered: true
+        )
+    }
+
+    /// macOS asked once and was refused: only System Settings can allow it now.
+    private func openFolderPrivacySettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders") {
+            NSWorkspace.shared.open(url)
+        }
+    }
 }
 
-/// The latest batch above the copies: its title (drag it to take the whole
-/// batch), "…" and "Paste into … · N", then its screenshots in one row.
-/// Click a screenshot to paste only it (⌘-click for several).
+/// The latest batch above the copies (Buffer v3): a film of three frames
+/// across the width, the third «+N» from four shots on (a click shows them
+/// all under «Снимки»), then the action row: the handle ≡ «3 снимка» over
+/// the time, «Выбрать все», «…» and the lit key. A click on a frame ticks
+/// it (⇧ a range), a double click opens Quick Look, a frame drags out as its
+/// file. A toast takes the handle's place.
 private struct LatestBatchStrip: View {
     let batch: ScreenshotBatch
     @ObservedObject var quickLook: QuickLookService
+    /// «+N»: every batch, under «Снимки».
+    let onShowAll: () -> Void
     @ObservedObject private var manager = ScreenshotShelfManager.shared
+    @ObservedObject private var state = BufferTabState.shared
     @EnvironmentObject private var vm: DynamicIslandViewModel
     @State private var dragToken = UUID()
-    @State private var headerHovered = false
-
-    static let thumbnailWidth: Double = 104
+    @State private var filmWidth: CGFloat = 0
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 6) {
-                header
-                Spacer(minLength: 4)
-                BatchSelectAllButton(batch: batch)
-                BatchActionsMenu(batch: batch, quickLook: quickLook)
-                BatchPasteButton(batch: batch)
-            }
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
-                    ForEach(batch.newestFirst) { item in
-                        ScreenshotTile(
-                            item: item,
-                            width: Self.thumbnailWidth,
-                            isSelected: manager.selection.contains(item.id),
-                            onCommand: run,
-                            onDragBegan: dragBegan,
-                            onDragEnded: dragEnded
-                        )
-                    }
-                }
-            }
-            .frame(height: (Self.thumbnailWidth * 0.62).rounded())
+        VStack(alignment: .leading, spacing: 12) {
+            film
+            BatchActionRow(
+                batch: batch,
+                quickLook: quickLook,
+                isLit: true,
+                // A short confirmation («Скопировано · 3») only: a warning
+                // says what to do next and goes to the capsule, in full.
+                toast: state.toastIsWarning ? nil : state.toast.map { (message: $0, warning: false) },
+                onCommand: { Self.run($0, batch: batch, quickLook: quickLook) },
+                onDragBegan: dragBegan,
+                onDragEnded: dragEnded
+            )
+            .animation(BufferTabView.fade, value: state.toast)
         }
-        .padding(10)
-        .background(RoundedRectangle(cornerRadius: DS.Radius.panel, style: .continuous).fill(DS.Palette.surface))
+        .onChange(of: manager.selection) {
+            if quickLook.isQuickLookOpen { quickLook.updateSelection(urls: manager.pasteURLs(for: batch)) }
+        }
         .onDisappear { vm.setAutoCloseSuppression(false, token: dragToken) }
     }
 
-    /// The title is the handle for dragging the whole batch out.
-    private var header: some View {
-        HStack(spacing: 6) {
-            Image(systemName: "line.3.horizontal")
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(headerHovered ? DS.Palette.textSecondary : DS.Palette.textTertiary)
-            Text(ScreenshotBatchTitle.make(for: batch))
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(DS.Palette.text)
-                .lineLimit(1)
+    private var film: some View {
+        let frame = ScreenshotGridLayout.filmFrame(width: filmWidth)
+        let frames = ScreenshotGridLayout.filmFrames
+        let shots = Array(batch.newestFirst.prefix(frames))
+        let more = ScreenshotGridLayout.filmMore(count: batch.items.count)
+        return HStack(spacing: ScreenshotGridLayout.spacing) {
+            ForEach(Array(shots.enumerated()), id: \.element.id) { index, item in
+                let isMore = more != nil && index == frames - 1
+                ScreenshotTile(
+                    item: item,
+                    width: frame.width,
+                    isSelected: !isMore && manager.selection.contains(item.id),
+                    moreCount: isMore ? more : nil,
+                    onMore: isMore ? onShowAll : nil,
+                    onCommand: { Self.run($0, batch: batch, quickLook: quickLook) },
+                    onDragBegan: dragBegan,
+                    onDragEnded: dragEnded
+                )
+            }
         }
-        .padding(.vertical, 4)
-        .padding(.horizontal, 6)
-        .background(
-            RoundedRectangle(cornerRadius: DS.Radius.chip, style: .continuous)
-                .fill(headerHovered ? DS.Palette.hoverFill : .clear)
-        )
-        .overlay(
-            ScreenshotDragSource(
-                image: nil,
-                onClick: { _ in },
-                urlsForDrag: { batch.items.map(\.url) },
-                onDragBegan: dragBegan,
-                onDragEnded: dragEnded,
-                onCommand: run
-            )
-        )
-        .onHover { hovering in withAnimation(DS.hover) { headerHovered = hovering } }
-        .help(String(localized: "Drag to take the whole batch"))
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(height: frame.height)
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { filmWidth = $0 }
     }
 
-    private func run(_ command: ScreenshotGridCommand) {
+    /// The film's keys, also reached from the history in «Все».
+    static func run(_ command: ScreenshotGridCommand, batch: ScreenshotBatch, quickLook: QuickLookService) {
+        let manager = ScreenshotShelfManager.shared
         switch command {
         case .quickLook:
             if quickLook.isQuickLookOpen {
@@ -328,9 +557,7 @@ private struct LatestBatchStrip: View {
         case .removeSelected:
             manager.removeSelected(in: batch)
         case .copy:
-            let urls = manager.pasteURLs(for: batch)
-            manager.copy(urls)
-            BufferTabState.shared.show(toast: BufferTabState.copiedScreenshots(urls.count), warning: false, for: 2)
+            BufferTabState.showCopied(after: manager.copy(manager.pasteURLs(for: batch)))
         }
     }
 
@@ -342,5 +569,7 @@ private struct LatestBatchStrip: View {
     private func dragEnded(_ succeeded: Bool) {
         manager.dragEnded(succeeded: succeeded)
         vm.setAutoCloseSuppression(false, token: dragToken)
+        // Dropped outside: close if the pointer is no longer over the island.
+        vm.shouldRecheckHover.toggle()
     }
 }

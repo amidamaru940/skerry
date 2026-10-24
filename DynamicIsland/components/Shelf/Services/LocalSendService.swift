@@ -9,6 +9,7 @@
  */
 
 import Foundation
+import Combine
 import Network
 import Defaults
 import UniformTypeIdentifiers
@@ -70,11 +71,31 @@ final class LocalSendService: NSObject, ObservableObject {
     private var knownPeerIPs: [String] = []
     private var isStarted = false
     private var enabledObserver: Task<Void, Never>?
+    /// Discovery that the gate stopped, to start again on return.
+    private var pausedByGate = false
+    private var gateCancellable: AnyCancellable?
     private var completionDismissTask: Task<Void, Never>?
 
     private override init() {
         selectedDeviceID = Defaults[.localSendSelectedDeviceID]
         super.init()
+        // Asleep, locked or screen off: no listener, multicast group or
+        // announcements (upstream kept all three through the night, and an
+        // open port on Wi-Fi can wake a sleeping Mac). Back: as it was.
+        gateCancellable = ActivityGate.shared.publisher(for: .userPresent)
+            .dropFirst()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] present in
+                guard let self else { return }
+                if present {
+                    guard self.pausedByGate else { return }
+                    self.pausedByGate = false
+                    self.startDiscovery()
+                } else if self.isStarted {
+                    self.stopDiscovery()
+                    self.pausedByGate = true
+                }
+            }
     }
     
     func clearRejectedStatus(for deviceID: String) {
@@ -94,6 +115,10 @@ final class LocalSendService: NSObject, ObservableObject {
 
     func startDiscovery() {
         guard isEnabled, !isStarted else { return }
+        guard ActivityGate.shared.allows(.userPresent) else {
+            pausedByGate = true
+            return
+        }
         isStarted = true
         observeEnabledSetting()
 
@@ -108,7 +133,9 @@ final class LocalSendService: NSObject, ObservableObject {
             ])
             let params = NWParameters.udp
             params.allowLocalEndpointReuse = true
-            params.includePeerToPeer = true
+            // LocalSend peers are on the local network; AWDL (the Wi-Fi
+            // peer-to-peer link) only kept the radio busier.
+            params.includePeerToPeer = false
 
             let connectionGroup = NWConnectionGroup(with: group, using: params)
             connectionGroup.setReceiveHandler(maximumMessageSize: 65_536) { [weak self] message, content, _ in
@@ -661,7 +688,7 @@ final class LocalSendService: NSObject, ObservableObject {
         do {
             let params = NWParameters.tcp
             params.allowLocalEndpointReuse = true
-            params.includePeerToPeer = true
+            params.includePeerToPeer = false
 
             let listener = try NWListener(
                 using: params,

@@ -44,7 +44,10 @@ final class DoNotDisturbManager: ObservableObject {
     private let focusLogStream = FocusLogStream()
     private let assertionsURL = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Library/DoNotDisturb/DB/Assertions.json")
-    private var pollingSource: DispatchSourceTimer?
+    /// Watches the folder of the assertions file (needs Full Disk Access).
+    private var pollingSource: DispatchSourceFileSystemObject?
+    private var fullDiskAccessRetry: NSObjectProtocol?
+    private var gateCancellable: AnyCancellable?
     private var lastAssertionsModificationDate: Date?
     private var modeCancellable: AnyCancellable?
     /// Periodic task that verifies focus is still active when `isDoNotDisturbActive` is true.
@@ -79,6 +82,12 @@ final class DoNotDisturbManager: ObservableObject {
 
                 self.applyMonitoringModeChange(change.newValue)
             }
+
+        gateCancellable = ActivityGate.shared.publisher(for: .userPresent)
+            .dropFirst()
+            .filter { $0 }
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.verifyOnReturn() }
     }
 
     deinit {
@@ -288,12 +297,14 @@ final class DoNotDisturbManager: ObservableObject {
         guard focusActive else { return }
 
         stateVerificationTask = Task { @MainActor [weak self] in
-            // Wait a bit before starting verification to let notifications settle.
-            try? await Task.sleep(for: .seconds(5))
-
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(3))
-                guard let self, self.isDoNotDisturbActive else { break }
+            // Three looks, 8 s, 18 s and a minute after it came on (the first
+            // waits for notifications to settle), then the folder watch and
+            // the look on coming back to the Mac carry on. Upstream looked
+            // every 3 s for as long as the focus lasted -- a Sleep focus kept
+            // it going all night.
+            for delay in [8, 10, 42] {
+                try? await Task.sleep(for: .seconds(delay))
+                guard !Task.isCancelled, let self, self.isDoNotDisturbActive else { break }
 
                 // Check the assertions file directly (if FDA is available).
                 let focusStillActive = await self.verifyFocusActiveFromAssertions()
@@ -581,23 +592,64 @@ private extension DoNotDisturbManager {
         }
     }
 
+    /// Reads the assertions file when its folder changes, instead of every
+    /// 2 s. Without Full Disk Access the folder cannot be opened and the
+    /// focus notifications are all there is; upstream's timer then tried to
+    /// open TCC.db every 2 s, each try a denied file access. Whether access
+    /// was granted is asked again when Skerry comes forward (after Settings).
     func startAssertionsPolling() {
         stopAssertionsPolling()
         lastAssertionsModificationDate = nil
 
-        let timer = DispatchSource.makeTimerSource(queue: pollingQueue)
-        timer.schedule(deadline: .now() + .seconds(1), repeating: .seconds(2), leeway: .milliseconds(250))
-        timer.setEventHandler { [weak self] in
+        guard FullDiskAccessAuthorization.hasPermission() else {
+            fullDiskAccessRetry = NotificationCenter.default.addObserver(
+                forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
+            ) { [weak self] _ in
+                guard let self, self.isMonitoring, self.monitoringMode != .useDevTools,
+                      FullDiskAccessAuthorization.hasPermission() else { return }
+                self.startAssertionsPolling()
+            }
+            return
+        }
+
+        let folder = assertionsURL.deletingLastPathComponent()
+        let descriptor = open(folder.path, O_EVTONLY)
+        guard descriptor >= 0 else { return }
+        // A write into the folder: the file is replaced by renaming a new one
+        // over it, which is what changes the folder.
+        let source = DispatchSource.makeFileSystemObjectSource(
+            fileDescriptor: descriptor,
+            eventMask: [.write, .rename, .delete, .link, .attrib],
+            queue: pollingQueue
+        )
+        source.setEventHandler { [weak self] in
             self?.pollAssertionsState()
         }
-        timer.resume()
-        pollingSource = timer
+        source.setCancelHandler {
+            close(descriptor)
+        }
+        source.resume()
+        pollingSource = source
+        pollingQueue.async { [weak self] in
+            self?.pollAssertionsState()
+        }
     }
 
     func stopAssertionsPolling() {
         pollingSource?.cancel()
         pollingSource = nil
         lastAssertionsModificationDate = nil
+        if let fullDiskAccessRetry {
+            NotificationCenter.default.removeObserver(fullDiskAccessRetry)
+            self.fullDiskAccessRetry = nil
+        }
+    }
+
+    /// Back at the Mac with a focus believed on: one look, in case the off
+    /// notice came while the Mac slept.
+    private func verifyOnReturn() {
+        guard isMonitoring, isDoNotDisturbActive else { return }
+        updateStateVerification(focusActive: true)
     }
 
     func pollAssertionsState() {
@@ -1151,6 +1203,8 @@ private final class FocusLogStream {
                 let data = handle.availableData
 
                 if data.isEmpty {
+                    // End of file: called again at once, for ever, if left installed.
+                    handle.readabilityHandler = nil
                     self.queue.async { [weak self] in
                         self?.handleTermination()
                     }

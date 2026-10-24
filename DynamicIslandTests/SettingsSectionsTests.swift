@@ -53,4 +53,23 @@ final class SettingsSectionsTests: XCTestCase {
         XCTAssertFalse(SettingsSectionLayout.matches("Clipboard", query: "таймер", bundle: ru))
         XCTAssertFalse(SettingsSectionLayout.matches("Clipboard", query: "  ", bundle: ru))
     }
+
+    /// Concept E: rows the restyled island ignores are hidden, in the form and
+    /// in search; rows that still change something stay.
+    func testRowsWithoutEffectUnderConceptEAreHidden() {
+        XCTAssertFalse(SettingsRowVisibility.showsArtworkLighting, "no view reads lightingEffect")
+        XCTAssertFalse(SettingsRowVisibility.showsProgressBarRows(inlineHUD: true), "the level line ignores them")
+        XCTAssertTrue(SettingsRowVisibility.showsProgressBarRows(inlineHUD: false), "the Default HUD still draws bars")
+
+        for inline in [true, false] {
+            XCTAssertFalse(SettingsRowVisibility.isSearchable("Enable blur effect behind album art", inlineHUD: inline))
+            for title in SettingsRowVisibility.progressBarTitles {
+                XCTAssertEqual(SettingsRowVisibility.isSearchable(title, inlineHUD: inline), !inline, title)
+            }
+            // Still read by the open island's shape or the lock screen's music widget.
+            for kept in ["Corner radius scaling", "Enable colored spectrograms", "Slider color", "HUD style"] {
+                XCTAssertTrue(SettingsRowVisibility.isSearchable(kept, inlineHUD: inline), kept)
+            }
+        }
+    }
 }

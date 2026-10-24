@@ -105,6 +105,7 @@ class LockScreenManager: ObservableObject {
     private var collapseTask: Task<Void, Never>?
     private var postUnlockMusicHUDTask: Task<Void, Never>?
     private var lockStatePollTask: Task<Void, Never>?
+    private var lockStateObservers: [NSObjectProtocol] = []
     private var fingerprintAnimationResetTask: Task<Void, Never>?
     private var powerKeyMonitors: [Any] = []
     private var lastPowerKeyEventDate: Date = .distantPast
@@ -347,14 +348,15 @@ class LockScreenManager: ObservableObject {
         print("[\(self.timestamp())] LockScreenManager: ✅ Lock screen deactivated")
     }
     
-    // MARK: - Lock State Polling
+    // MARK: - Lock State Checks
 
     // Defensive fallback against late/missed `com.apple.screenIsUnlocked` and
     // `NSWorkspace.sessionDidBecomeActiveNotification` notifications, which
     // macOS sometimes delivers well after the user-perceived unlock — leaving
     // lock-screen widgets visible for an extra moment. While we believe we are
-    // locked, poll the canonical session-lock state and fire `screenUnlocked()`
-    // the moment the OS flips. The handler's duplicate-event guard makes this
+    // locked, the canonical session-lock state is read again when something
+    // that comes with an unlock happens, and `screenUnlocked()` fires the
+    // moment the OS reports it. The handler's duplicate-event guard makes this
     // safe to call alongside any later-arriving notification.
     private static func isSessionScreenLocked() -> Bool {
         guard let session = CGSessionCopyCurrentDictionary() as? [String: Any] else {
@@ -363,37 +365,60 @@ class LockScreenManager: ObservableObject {
         return session["CGSSessionScreenIsLocked"] as? Bool ?? false
     }
 
-    /// Starts the twice-a-second poll of the canonical session lock state.
+    /// While locked, re-checks the lock state when the display or the Mac
+    /// wakes or an app comes forward (an unlock does one of these), and once
+    /// more 0.5 s and 1.5 s after each, for a notification that is late.
     ///
-    /// Runs only while this manager believes the Mac is locked, and does two
-    /// things on each tick: fires `screenUnlocked()` as soon as the OS reports
-    /// the session unlocked, and re-presents the media panel if something has
-    /// taken it down while the Mac is still locked.
+    /// Upstream polled twice a second for the whole lock, so a Mac locked by
+    /// closing its lid kept waking the app through the night; with nothing
+    /// happening there is now nothing to do.
     private func startLockStatePolling() {
-        lockStatePollTask?.cancel()
-        lockStatePollTask = Task { [weak self] in
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .milliseconds(500))
-                if Task.isCancelled { return }
-                await MainActor.run {
-                    guard let self, self.isLocked else { return }
-                    if !Self.isSessionScreenLocked() {
-                        print("[\(self.timestamp())] LockScreenManager: 🔓 Polling detected unlock ahead of notification")
-                        self.screenUnlocked()
-                        return
-                    }
-
-                    // Still locked: make sure the media panel is actually there.
-                    LockScreenPanelManager.shared.ensurePresentedWhileLocked()
-                }
+        stopLockStatePolling()
+        let center = NSWorkspace.shared.notificationCenter
+        let names = [
+            NSWorkspace.screensDidWakeNotification,
+            NSWorkspace.didWakeNotification,
+            NSWorkspace.didActivateApplicationNotification,
+        ]
+        lockStateObservers = names.map { name in
+            center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.recheckLockState() }
             }
         }
     }
 
-    /// Cancels the lock state poll. Safe to call when no poll is running.
+    private func recheckLockState() {
+        guard isLocked else { return }
+        checkLockStateOnce()
+        lockStatePollTask?.cancel()
+        lockStatePollTask = Task { [weak self] in
+            for delay in [500, 1_000] {
+                try? await Task.sleep(for: .milliseconds(delay))
+                if Task.isCancelled { return }
+                await MainActor.run { self?.checkLockStateOnce() }
+            }
+        }
+    }
+
+    /// Fires `screenUnlocked()` if the OS says the session is unlocked, and
+    /// re-presents the media panel if something has taken it down while the
+    /// Mac is still locked.
+    private func checkLockStateOnce() {
+        guard isLocked else { return }
+        if !Self.isSessionScreenLocked() {
+            print("[\(timestamp())] LockScreenManager: 🔓 Check found the unlock ahead of the notification")
+            screenUnlocked()
+            return
+        }
+        LockScreenPanelManager.shared.ensurePresentedWhileLocked()
+    }
+
+    /// Stops the lock state checks. Safe to call when none are running.
     private func stopLockStatePolling() {
         lockStatePollTask?.cancel()
         lockStatePollTask = nil
+        lockStateObservers.forEach(NSWorkspace.shared.notificationCenter.removeObserver)
+        lockStateObservers.removeAll()
     }
 
     // MARK: - Idle State Management

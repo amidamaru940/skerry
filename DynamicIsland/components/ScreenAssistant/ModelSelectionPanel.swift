@@ -122,12 +122,13 @@ struct ModelSelectionView: View {
     @State private var selectedModel: AIModel? = Defaults[.selectedAIModel]
     @State private var enableThinking: Bool = Defaults[.enableThinkingMode]
     
-    // API Keys
-    @State private var geminiApiKey: String = Defaults[.geminiApiKey]
-    @State private var openaiApiKey: String = Defaults[.openaiApiKey]
-    @State private var claudeApiKey: String = Defaults[.claudeApiKey]
+    // API keys typed here; a saved key lives in the Keychain and is never
+    // read back into a field.
+    @State private var keyInputs: [ScreenAssistantKeyAccount: String] = [:]
+    @State private var keyStates: [ScreenAssistantKeyAccount: ScreenAssistantKeyState] = [:]
+    /// The Keychain refused a typed key: the panel stays open with the text.
+    @State private var keySaveFailed = false
     @State private var localEndpoint: String = Defaults[.localModelEndpoint]
-    @State private var groqApiKey: String = Defaults[.groqApiKey]
     
     @State private var showingApiKeyAlert = false
     
@@ -251,11 +252,10 @@ struct ModelSelectionView: View {
                         
                         ApiConfigurationSection(
                             provider: selectedProvider,
-                            geminiApiKey: $geminiApiKey,
-                            openaiApiKey: $openaiApiKey,
-                            claudeApiKey: $claudeApiKey,
+                            keyInputs: $keyInputs,
+                            keyStates: keyStates,
                             localEndpoint: $localEndpoint,
-                            groqApiKey: $groqApiKey
+                            onDeleteKey: deleteKey
                         )
                     }
                 }
@@ -273,6 +273,13 @@ struct ModelSelectionView: View {
                 .buttonStyle(PlainButtonStyle())
                 
                 Spacer()
+
+                if keySaveFailed {
+                    Text("Couldn't save to the Keychain")
+                        .font(.caption)
+                        .foregroundColor(.red)
+                        .lineLimit(1)
+                }
                 
                 Button("Save Configuration") {
                     saveConfiguration()
@@ -292,18 +299,14 @@ struct ModelSelectionView: View {
     }
     
     private var isConfigurationValid: Bool {
-        switch selectedProvider {
-        case .gemini:
-            return !geminiApiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        case .openai:
-            return !openaiApiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        case .claude:
-            return !claudeApiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        case .local:
+        guard let account = ScreenAssistantKeyAccount(provider: selectedProvider) else {
             return !localEndpoint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        case .groq:
-            return !groqApiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
+        return keyStates[account] == .saved || !typedKey(for: account).isEmpty
+    }
+
+    private func typedKey(for account: ScreenAssistantKeyAccount) -> String {
+        (keyInputs[account] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
     }
     
     private func loadCurrentConfiguration() {
@@ -312,11 +315,16 @@ struct ModelSelectionView: View {
         ensureValidModelSelection()
         enableThinking = Defaults[.enableThinkingMode]
         
-        geminiApiKey = Defaults[.geminiApiKey]
-        openaiApiKey = Defaults[.openaiApiKey]
-        claudeApiKey = Defaults[.claudeApiKey]
+        keyInputs = [:]
+        keySaveFailed = false
+        ScreenAssistantKeys.states { keyStates = $0 }
         localEndpoint = Defaults[.localModelEndpoint]
-        groqApiKey = Defaults[.groqApiKey]
+    }
+
+    private func deleteKey(_ account: ScreenAssistantKeyAccount) {
+        if ScreenAssistantKeys.delete(account) {
+            keyStates[account] = .notSet
+        }
     }
     
     private func saveConfiguration() {
@@ -326,13 +334,22 @@ struct ModelSelectionView: View {
         Defaults[.selectedAIModel] = selectedModel
         Defaults[.enableThinkingMode] = enableThinking
         
-        Defaults[.geminiApiKey] = geminiApiKey
-        Defaults[.openaiApiKey] = openaiApiKey
-        Defaults[.claudeApiKey] = claudeApiKey
+        var failed = false
+        for account in ScreenAssistantKeyAccount.allCases where !typedKey(for: account).isEmpty {
+            if ScreenAssistantKeys.save(typedKey(for: account), for: account) {
+                keyStates[account] = .saved
+                keyInputs[account] = nil
+            } else {
+                failed = true
+            }
+        }
+        keySaveFailed = failed
         Defaults[.localModelEndpoint] = localEndpoint
-        Defaults[.groqApiKey] = groqApiKey
         
-        closePanel()
+        // A key the Keychain refused keeps its text, and the panel stays.
+        if !failed {
+            closePanel()
+        }
         
         // Notify that configuration changed
         NotificationCenter.default.post(name: .aiModelConfigurationChanged, object: nil)
@@ -468,36 +485,35 @@ struct ModelRow: View {
 // MARK: - API Configuration Section
 struct ApiConfigurationSection: View {
     let provider: AIModelProvider
-    @Binding var geminiApiKey: String
-    @Binding var openaiApiKey: String
-    @Binding var claudeApiKey: String
+    @Binding var keyInputs: [ScreenAssistantKeyAccount: String]
+    let keyStates: [ScreenAssistantKeyAccount: ScreenAssistantKeyState]
     @Binding var localEndpoint: String
-    @Binding var groqApiKey: String
+    let onDeleteKey: (ScreenAssistantKeyAccount) -> Void
     
     var body: some View {
         VStack(spacing: 12) {
             switch provider {
             case .gemini:
-                ApiKeyField(
+                keyField(
+                    .gemini,
                     title: "Gemini API Key",
                     placeholder: "Enter your Gemini API key",
-                    value: $geminiApiKey,
                     helpText: "Get your API key from Google AI Studio"
                 )
                 
             case .openai:
-                ApiKeyField(
+                keyField(
+                    .openai,
                     title: "OpenAI API Key",
                     placeholder: "Enter your OpenAI API key",
-                    value: $openaiApiKey,
                     helpText: "Get your API key from OpenAI Platform"
                 )
                 
             case .claude:
-                ApiKeyField(
+                keyField(
+                    .claude,
                     title: "Claude API Key",
                     placeholder: "Enter your Claude API key",
-                    value: $claudeApiKey,
                     helpText: "Get your API key from Anthropic Console"
                 )
                 
@@ -510,10 +526,10 @@ struct ApiConfigurationSection: View {
                     isSecure: false
                 )
             case .groq:
-                ApiKeyField(
+                keyField(
+                    .groq,
                     title: "Groq API Key",
                     placeholder: "Enter your Groq API key",
-                    value: $groqApiKey,
                     helpText: "Get your API key from Groq Console"
                 )
             }
@@ -521,6 +537,22 @@ struct ApiConfigurationSection: View {
         .padding(16)
         .background(Color.gray.opacity(0.05))
         .cornerRadius(12)
+    }
+
+    private func keyField(_ account: ScreenAssistantKeyAccount, title: String,
+                          placeholder: String, helpText: String) -> ApiKeyField {
+        ApiKeyField(
+            title: title,
+            placeholder: placeholder,
+            value: Binding(
+                get: { keyInputs[account] ?? "" },
+                set: { keyInputs[account] = $0 }
+            ),
+            helpText: helpText,
+            isSaved: keyStates[account] == .saved,
+            keychainUnavailable: keyStates[account] == .unavailable,
+            onDelete: { onDeleteKey(account) }
+        )
     }
 }
 
@@ -531,6 +563,11 @@ struct ApiKeyField: View {
     @Binding var value: String
     let helpText: String
     var isSecure: Bool = true
+    /// A key is saved: it is never shown, only said to be in the Keychain.
+    var isSaved: Bool = false
+    /// The Keychain answered with an error, so whether a key is there is unknown.
+    var keychainUnavailable: Bool = false
+    var onDelete: (() -> Void)? = nil
     
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -539,7 +576,16 @@ struct ApiKeyField: View {
                 .fontWeight(.medium)
                 .foregroundColor(.primary)
             
-            if isSecure {
+            if isSaved {
+                HStack {
+                    Text("Saved in Keychain")
+                        .foregroundColor(.secondary)
+                    Spacer()
+                    Button("Delete Key", role: .destructive) {
+                        onDelete?()
+                    }
+                }
+            } else if isSecure {
                 SecureField(placeholder, text: $value)
                     .textFieldStyle(.roundedBorder)
             } else {
@@ -547,9 +593,15 @@ struct ApiKeyField: View {
                     .textFieldStyle(.roundedBorder)
             }
             
-            Text(helpText)
-                .font(.caption)
-                .foregroundColor(.secondary)
+            if keychainUnavailable {
+                Text("No access to the Keychain")
+                    .font(.caption)
+                    .foregroundColor(.red)
+            } else if !isSaved {
+                Text(helpText)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
         }
     }
 }

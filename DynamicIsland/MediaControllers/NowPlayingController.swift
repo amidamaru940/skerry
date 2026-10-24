@@ -45,8 +45,11 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
         $playbackState.eraseToAnyPublisher()
     }
     
+    /// Whether the system Now Playing can be read here: false only when the
+    /// adapter could not be launched. The adapter itself is not running all
+    /// the time (see `AdapterDemand`), so its process says nothing about it.
     var isWorking: Bool {
-        return process != nil && process?.isRunning == true
+        !adapterLaunchFailed
     }
     private var lastMusicItem:
         (title: String, artist: String, album: String, duration: TimeInterval, artworkData: Data?)?
@@ -71,6 +74,43 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
     private var process: Process?
     private var pipeHandler: JSONLinesPipeHandler?
     private var streamTask: Task<Void, Never>?
+
+    // MARK: - Adapter demand
+
+    /// When the adapter (a perl process) runs: from the moment another app
+    /// starts sending audio until, for `idleGrace`, no app sends any and the
+    /// adapter reports nothing playing; never while the Mac or its screen
+    /// sleeps. Upstream started it at launch and kept it for the whole
+    /// session.
+    enum AdapterDemand {
+        /// Longer than the island keeps a paused track (`waitInterval`, 10 s).
+        static let idleGrace: TimeInterval = 30
+        static let firstRestartDelay: TimeInterval = 2
+        static let maximumRestartDelay: TimeInterval = 60
+
+        /// Whether a report keeps the adapter from going idle.
+        static func reportCountsAsPlaying(isPlaying: Bool, title: String) -> Bool {
+            isPlaying && !title.isEmpty
+        }
+
+        static func nextRestartDelay(after delay: TimeInterval) -> TimeInterval {
+            min(max(delay, firstRestartDelay) * 2, maximumRestartDelay)
+        }
+    }
+
+    private let outputActivity = AudioOutputActivity()
+    private var screenInUse = true
+    private var gateCancellable: AnyCancellable?
+    private var idleStopWork: DispatchWorkItem?
+    private var restartWork: DispatchWorkItem?
+    private var restartDelay = AdapterDemand.firstRestartDelay
+    private var adapterLaunchFailed = false
+    /// Set while the adapter is being started (its launch is asynchronous).
+    private var adapterStarting = false
+    /// What the last report said, read on the main thread.
+    private var lastReportPlaying = false
+
+    var isAdapterRunning: Bool { process?.isRunning == true || adapterStarting }
 
     // MARK: - Initialization
     init?() {
@@ -99,7 +139,132 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
         MRMediaRemoteSetRepeatModeFunction = unsafeBitCast(
             MRMediaRemoteSetRepeatModePointer, to: (@convention(c) (Int) -> Void).self)
 
-        Task { await setupNowPlayingObserver() }
+        DispatchQueue.main.async { [weak self] in self?.beginWatchingForPlayers() }
+    }
+
+    /// Follows the gate and audio output; the adapter starts from there.
+    private func beginWatchingForPlayers() {
+        outputActivity.onOutputStarted = { [weak self] in self?.startAdapterIfNeeded() }
+        outputActivity.onActivityChanged = { [weak self] outputting in
+            guard let self, self.process != nil else { return }
+            if outputting {
+                self.idleStopWork?.cancel()
+                self.idleStopWork = nil
+            } else if !self.lastReportPlaying, self.idleStopWork == nil {
+                self.scheduleIdleStop()
+            }
+        }
+        gateCancellable = ActivityGate.shared.publisher(for: .screenInUse)
+            .sink { [weak self] inUse in
+                guard let self else { return }
+                self.screenInUse = inUse
+                if inUse {
+                    // Back (wake, display on): music still playing starts it.
+                    self.outputActivity.start()
+                } else {
+                    self.outputActivity.stop()
+                    self.stopAdapter()
+                    self.freezePlaybackState()
+                }
+            }
+    }
+
+    /// With the adapter gone nothing would ever report the music stopping, and
+    /// a "playing" left behind keeps the visualizer and the progress moving.
+    /// Shown as paused where it got to; a player still going when the screen
+    /// is back starts the adapter again, and its report replaces this.
+    private func freezePlaybackState() {
+        guard rawState.isPlaying else { return }
+        let now = Date()
+        var frozen = rawState
+        frozen.currentTime = max(0, rawState.currentTime + now.timeIntervalSince(rawState.lastUpdated) * rawState.playbackRate)
+        frozen.lastUpdated = now
+        frozen.isPlaying = false
+        rawState = frozen
+        lastReportPlaying = false
+        publish(now: now)
+    }
+
+    private func startAdapterIfNeeded() {
+        guard screenInUse, !isAdapterRunning, !adapterLaunchFailed else { return }
+        restartWork?.cancel()
+        restartWork = nil
+        adapterStarting = true
+        lastReportPlaying = false
+        // Nothing reported yet: if nothing plays, it stops again after the grace.
+        scheduleIdleStop()
+        Task { [weak self] in
+            await self?.setupNowPlayingObserver()
+        }
+    }
+
+    /// Stops the adapter process; the island keeps the last report.
+    private func stopAdapter() {
+        idleStopWork?.cancel()
+        idleStopWork = nil
+        restartWork?.cancel()
+        restartWork = nil
+        restartDelay = AdapterDemand.firstRestartDelay
+        guard let process else { return }
+        process.terminationHandler = nil
+        if process.isRunning {
+            // Its end of the pipe closes with it, which ends the stream task.
+            process.terminate()
+        }
+        self.process = nil
+        // Not closed here: the read that is waiting would never be answered.
+        // The pipe ends with the process, which ends the read, the stream
+        // task and with it the last hold on the pipe.
+        pipeHandler = nil
+        streamTask = nil
+    }
+
+    private func scheduleIdleStop() {
+        idleStopWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.idleStopWork = nil
+            // A player that keeps its output open while paused resumes
+            // without a new start of output, so sound keeps it too.
+            guard !self.lastReportPlaying, !self.outputActivity.anyOtherOutput else { return }
+            self.stopAdapter()
+        }
+        idleStopWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + AdapterDemand.idleGrace, execute: work)
+    }
+
+    /// Every report: playing keeps the adapter, anything else starts the grace.
+    private func noteAdapterReport(playing: Bool) {
+        lastReportPlaying = playing
+        if playing {
+            idleStopWork?.cancel()
+            idleStopWork = nil
+            restartDelay = AdapterDemand.firstRestartDelay
+        } else if idleStopWork == nil, process != nil, !outputActivity.anyOtherOutput {
+            scheduleIdleStop()
+        }
+    }
+
+    /// The adapter exited without being asked: back after a growing pause
+    /// while something plays (2 s, doubling to a minute), not in a loop.
+    private func adapterExitedOnItsOwn() {
+        process = nil
+        pipeHandler = nil
+        streamTask = nil
+        idleStopWork?.cancel()
+        idleStopWork = nil
+        guard screenInUse, outputActivity.anyOtherOutput else {
+            freezePlaybackState()
+            return
+        }
+        let delay = restartDelay
+        restartDelay = AdapterDemand.nextRestartDelay(after: restartDelay)
+        let work = DispatchWorkItem { [weak self] in
+            self?.restartWork = nil
+            self?.startAdapterIfNeeded()
+        }
+        restartWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
 
     deinit {
@@ -283,7 +448,6 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
     
     // MARK: - Setup Methods
     private func setupNowPlayingObserver() async {
-        let process = Process()
         guard
             let scriptURL = Bundle.main.url(forResource: "mediaremote-adapter", withExtension: "pl"),
             //let frameworkPath = Bundle.main.privateFrameworksPath?.appending("/MediaRemoteAdapter.framework")
@@ -294,51 +458,86 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
 
         else {
             assertionFailure("Could not find mediaremote-adapter.pl script or framework path")
+            await MainActor.run {
+                self.adapterStarting = false
+                self.adapterLaunchFailed = true
+            }
             return
         }
-        
+
+        let pipeHandler = JSONLinesPipeHandler()
+        let outputPipe = await pipeHandler.getPipe()
+        await MainActor.run {
+            self.launchAdapter(script: scriptURL, framework: frameworkPath, output: outputPipe, pipeHandler: pipeHandler)
+        }
+    }
+
+    /// On the main thread, like `stopAdapter`, so a stop never races a start.
+    private func launchAdapter(script scriptURL: URL, framework frameworkPath: String,
+                               output outputPipe: Pipe, pipeHandler: JSONLinesPipeHandler) {
+        adapterStarting = false
+        // The screen went to sleep, or another start won, while this one was
+        // on its way.
+        guard screenInUse, process == nil else {
+            Task { await pipeHandler.close() }
+            return
+        }
+
+        let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/perl")
         // --micros swaps the time keys for microsecond equivalents. The default
         // "timestamp" is an ISO-8601 string truncated to whole seconds, which
         // throws away up to a second of the playback anchor and makes every
         // position estimate drift by that much.
         process.arguments = [scriptURL.path, frameworkPath, "stream", "--micros"]
-        
-        let pipeHandler = JSONLinesPipeHandler()
-        process.standardOutput = await pipeHandler.getPipe()
+        process.standardOutput = outputPipe
 
         // Capture stderr so framework/script errors are logged
         let stderrPipe = Pipe()
         process.standardError = stderrPipe
         stderrPipe.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
-            guard !data.isEmpty,
-                  let message = String(data: data, encoding: .utf8)?
+            guard !data.isEmpty else {
+                // End of file: left installed, the handler is called again at
+                // once, for ever (a core at 100% once the adapter exits).
+                handle.readabilityHandler = nil
+                return
+            }
+            guard let message = String(data: data, encoding: .utf8)?
                     .trimmingCharacters(in: .whitespacesAndNewlines),
                   !message.isEmpty
             else { return }
             print("NowPlayingController [stderr]: \(message)")
         }
-        
-        self.process = process
-        self.pipeHandler = pipeHandler
+
+        process.terminationHandler = { [weak self, weak process] _ in
+            DispatchQueue.main.async {
+                guard let self, let process, self.process === process else { return }
+                self.adapterExitedOnItsOwn()
+            }
+        }
 
         do {
             try process.run()
-            streamTask = Task { [weak self] in
-                await self?.processJSONStream()
-            }
         } catch {
-            assertionFailure("Failed to launch mediaremote-adapter.pl: \(error)")
+            adapterLaunchFailed = true
+            stderrPipe.fileHandleForReading.readabilityHandler = nil
+            Task { await pipeHandler.close() }
+            print("NowPlayingController: failed to launch mediaremote-adapter.pl: \(error)")
+            return
         }
-    }
 
-    // MARK: - Async Stream Processing
-    private func processJSONStream() async {
-        guard let pipeHandler = self.pipeHandler else { return }
-        
-        await pipeHandler.readJSONLines(as: NowPlayingUpdate.self) { [weak self] update in
-            await self?.handleAdapterUpdate(update)
+        self.process = process
+        self.pipeHandler = pipeHandler
+        // Only the handler and a weak self: upstream's task held the
+        // controller for as long as the stream ran, so a replaced controller
+        // and its perl process were never freed.
+        // The task itself captures self weakly too: without it the inner
+        // [weak self] makes the task hold self strongly (#ImplicitStrongCapture).
+        streamTask = Task { [weak self] in
+            await pipeHandler.readJSONLines(as: NowPlayingUpdate.self) { [weak self] update in
+                await self?.handleAdapterUpdate(update)
+            }
         }
     }
 
@@ -476,6 +675,8 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
         
         self.rawState = newPlaybackState
         publish(now: now)
+        let playing = AdapterDemand.reportCountsAsPlaying(isPlaying: newPlaybackState.isPlaying, title: newPlaybackState.title)
+        await MainActor.run { self.noteAdapterReport(playing: playing) }
     }
 
     /// Publishes what the system reports, minus a video without track details

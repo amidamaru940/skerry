@@ -114,6 +114,19 @@ final class SystemTimerBridge: ObservableObject {
 
     private var didWarnAboutAccessibility = false
 
+    // `log stream --level debug` keeps debug-level streaming on in logd for
+    // as long as it runs, so it runs only while it can tell something: a
+    // Clock timer is running or paused, or the Clock app was just used (a
+    // timer may be starting). Upstream ran it from launch for good, through
+    // every dark wake. On `queue`.
+    private static let clockUseWindow: TimeInterval = 120
+    private var clockRecentlyUsedUntil: Date?
+    private var screenInUse = true
+    private var gateCancellable: AnyCancellable?
+    private var logRestartDelay: TimeInterval = 2
+    private var demandStopWorkItem: DispatchWorkItem?
+    private var clockWindowWorkItem: DispatchWorkItem?
+
     private func refreshClockControlCapability() {
         canControlClockTimer = Defaults[.mirrorSystemTimer]
             && AXIsProcessTrusted()
@@ -129,6 +142,16 @@ final class SystemTimerBridge: ObservableObject {
                     guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
                           app.bundleIdentifier == "com.apple.clock" else { return }
                     self?.refreshClockControlCapability()
+                    self?.noteClockAppUse()
+                }
+        )
+        workspaceCancellables.insert(
+            center.publisher(for: NSWorkspace.didActivateApplicationNotification)
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] note in
+                    guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+                          app.bundleIdentifier == "com.apple.clock" else { return }
+                    self?.noteClockAppUse()
                 }
         )
         workspaceCancellables.insert(
@@ -167,8 +190,88 @@ final class SystemTimerBridge: ObservableObject {
                 }
             }
 
+        // Asleep, screen off or another user's session: nothing to mirror.
+        gateCancellable = ActivityGate.shared.publisher(for: .screenInUse)
+            .sink { [weak self] inUse in
+                self?.queue.async { [weak self] in
+                    guard let self else { return }
+                    self.screenInUse = inUse
+                    if inUse {
+                        // Back: the timer may have changed meanwhile.
+                        if self.fileMonitor != nil { self.refreshMetadata() }
+                    } else {
+                        self.updateLogStreamDemand()
+                    }
+                }
+            }
+
         if Defaults[.mirrorSystemTimer] {
             startIfNeeded()
+        }
+    }
+
+    /// The Clock app came forward or started: a timer may be about to start.
+    private func noteClockAppUse() {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.clockRecentlyUsedUntil = Date().addingTimeInterval(Self.clockUseWindow)
+            // The preferences file may not have existed at launch.
+            if Defaults[.mirrorSystemTimer], self.fileMonitor == nil { self.startFileMonitor() }
+            self.updateLogStreamDemand()
+            self.clockWindowWorkItem?.cancel()
+            let workItem = DispatchWorkItem { [weak self] in self?.updateLogStreamDemand() }
+            self.clockWindowWorkItem = workItem
+            self.queue.asyncAfter(deadline: .now() + Self.clockUseWindow + 1, execute: workItem)
+        }
+    }
+
+    /// Whether the log stream (or its Accessibility fallback) has anything to
+    /// follow right now. On `queue`.
+    private var wantsLogStream: Bool {
+        guard Defaults[.mirrorSystemTimer], screenInUse else { return false }
+        if metadata?.state.isActive == true { return true }
+        if let until = clockRecentlyUsedUntil, Date() < until { return true }
+        return false
+    }
+
+    /// Starts or stops the log stream to match `wantsLogStream`. A stop waits
+    /// ten seconds, so the stream still delivers how a timer ended. On `queue`.
+    private func updateLogStreamDemand() {
+        if wantsLogStream {
+            demandStopWorkItem?.cancel()
+            demandStopWorkItem = nil
+            guard logProcess == nil, logRestartWorkItem == nil else { return }
+            let started = startLogStream()
+            let hasAccessibility = AXIsProcessTrusted()
+            if !started {
+                if hasAccessibility {
+                    if ticker == nil {
+                        logInfo("Falling back to Accessibility polling ticker")
+                        setupTicker()
+                    }
+                } else {
+                    logError("Unable to start log stream and missing Accessibility permission; timer mirroring inactive")
+                    postAccessibilityWarningIfNeeded()
+                }
+            } else if !hasAccessibility {
+                logDebug("Log stream active but Accessibility not trusted; AX fallback disabled")
+                postAccessibilityWarningIfNeeded()
+            }
+        } else {
+            guard logProcess != nil || ticker != nil || logRestartWorkItem != nil, demandStopWorkItem == nil else { return }
+            let delay: TimeInterval = screenInUse ? 10 : 0
+            let workItem = DispatchWorkItem { [weak self] in
+                guard let self else { return }
+                self.demandStopWorkItem = nil
+                guard !self.wantsLogStream else { return }
+                self.logInfo("Nothing to follow; stopping the log stream")
+                self.logRestartDelay = 2
+                self.stopLogStream()
+                self.ticker?.cancel()
+                self.ticker = nil
+            }
+            demandStopWorkItem = workItem
+            queue.asyncAfter(deadline: .now() + delay, execute: workItem)
         }
     }
 
@@ -190,26 +293,10 @@ final class SystemTimerBridge: ObservableObject {
             guard !self.isMonitoring else { return }
             self.logInfo("Starting monitoring pipeline")
 
-            self.refreshMetadata()
+            // The preferences file says when a timer runs; the log stream
+            // starts from there (`updateLogStreamDemand`, via refreshMetadata).
             self.startFileMonitor()
-
-            let logStarted = self.startLogStream()
-            let hasAccessibility = AXIsProcessTrusted()
-
-            self.logDebug("Log stream started: \(logStarted), AX trusted: \(hasAccessibility)")
-
-            if !logStarted {
-                if hasAccessibility {
-                    self.logInfo("Falling back to Accessibility polling ticker")
-                    self.setupTicker()
-                } else {
-                    self.logError("Unable to start log stream and missing Accessibility permission; timer mirroring inactive")
-                    self.postAccessibilityWarningIfNeeded()
-                }
-            } else if !hasAccessibility {
-                self.logDebug("Log stream active but Accessibility not trusted; AX fallback disabled")
-                self.postAccessibilityWarningIfNeeded()
-            }
+            self.refreshMetadata()
         }
     }
 
@@ -227,13 +314,10 @@ final class SystemTimerBridge: ObservableObject {
             self.ticker?.cancel()
             self.ticker = nil
 
+            // The cancel handler closes the descriptor.
             self.fileMonitor?.cancel()
             self.fileMonitor = nil
-
-            if self.fileDescriptor != -1 {
-                close(self.fileDescriptor)
-                self.fileDescriptor = -1
-            }
+            self.fileDescriptor = -1
 
             self.menuExtra = nil
             self.initialTotalDuration = nil
@@ -247,6 +331,9 @@ final class SystemTimerBridge: ObservableObject {
             self.logDidCompleteActiveTimer = false
             self.logRestartWorkItem?.cancel()
             self.logRestartWorkItem = nil
+            self.demandStopWorkItem?.cancel()
+            self.demandStopWorkItem = nil
+            self.logRestartDelay = 2
             self.pendingMainUpdate = nil
 
             if clearTimer {
@@ -301,7 +388,12 @@ final class SystemTimerBridge: ObservableObject {
 
         outputPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
-            guard !data.isEmpty else { return }
+            guard !data.isEmpty else {
+                // End of file: left installed, the handler is called again at
+                // once, for ever (a core at 100% until the restart cleared it).
+                handle.readabilityHandler = nil
+                return
+            }
             self?.queue.async { [weak self] in
                 self?.consumeLogData(data)
             }
@@ -354,9 +446,11 @@ final class SystemTimerBridge: ObservableObject {
         logPipe = nil
         logProcess = nil
         logBuffer.removeAll(keepingCapacity: false)
+        guard wantsLogStream else {
+            logInfo("Log stream exited; nothing to follow, not restarting")
+            return
+        }
         logError("Log stream exited unexpectedly; scheduling restart")
-
-        guard Defaults[.mirrorSystemTimer] else { return }
 
         if AXIsProcessTrusted(), ticker == nil {
             setupTicker()
@@ -371,15 +465,20 @@ final class SystemTimerBridge: ObservableObject {
         let workItem = DispatchWorkItem { [weak self] in
             guard let self else { return }
             self.logRestartWorkItem = nil
+            guard self.wantsLogStream else { return }
             let started = self.startLogStream()
             if !started, AXIsProcessTrusted(), self.ticker == nil {
                 self.setupTicker()
             }
         }
 
+        // 2 s, then doubling up to a minute: a `log` that keeps exiting must
+        // not be relaunched every two seconds for ever.
+        let delay = logRestartDelay
+        logRestartDelay = min(logRestartDelay * 2, 60)
         logRestartWorkItem = workItem
-        queue.asyncAfter(deadline: .now() + 2.0, execute: workItem)
-        logDebug("Scheduled log stream restart in 2s")
+        queue.asyncAfter(deadline: .now() + delay, execute: workItem)
+        logDebug("Scheduled log stream restart in \(delay)s")
     }
 
     private func consumeLogData(_ data: Data) {
@@ -426,6 +525,7 @@ final class SystemTimerBridge: ObservableObject {
     }
 
     private func startFileMonitor() {
+        guard fileMonitor == nil else { return }
         let fd = open(preferencesPath, O_EVTONLY)
         guard fd != -1 else {
             logError("Unable to monitor preferences at \(preferencesPath)")
@@ -433,25 +533,45 @@ final class SystemTimerBridge: ObservableObject {
         }
 
         fileDescriptor = fd
+        // The log stream now starts from this file's changes, so it must keep
+        // watching after the file is replaced: preferences are written by
+        // renaming a new file over the old one, which leaves this descriptor
+        // on a file that will never change again.
         let source = DispatchSource.makeFileSystemObjectSource(
             fileDescriptor: fd,
-            eventMask: [.write, .extend, .attrib, .rename],
+            eventMask: [.write, .extend, .attrib, .rename, .delete, .link],
             queue: queue
         )
 
         source.setEventHandler { [weak self] in
-            self?.refreshMetadata()
+            guard let self else { return }
+            let events = self.fileMonitor?.data ?? []
+            self.refreshMetadata()
+            if events.contains(.rename) || events.contains(.delete) {
+                self.rearmFileMonitor()
+            }
         }
 
-        source.setCancelHandler { [weak self] in
-            guard let fd = self?.fileDescriptor, fd != -1 else { return }
+        // Closes this descriptor, not whatever `fileDescriptor` holds by then.
+        source.setCancelHandler {
             close(fd)
-            self?.fileDescriptor = -1
         }
 
         source.resume()
         fileMonitor = source
         logDebug("Preferences file monitor armed")
+    }
+
+    /// Watches the file now at the preferences path. On `queue`.
+    private func rearmFileMonitor() {
+        fileMonitor?.cancel()
+        fileMonitor = nil
+        fileDescriptor = -1
+        queue.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            guard let self, Defaults[.mirrorSystemTimer], self.fileMonitor == nil else { return }
+            self.startFileMonitor()
+            self.refreshMetadata()
+        }
     }
 
     private func pollMenuExtra() {
@@ -933,6 +1053,7 @@ final class SystemTimerBridge: ObservableObject {
     private func refreshMetadata() {
         let previous = metadata
         metadata = fetchMetadata()
+        defer { updateLogStreamDemand() }
 
         if metadata == nil {
             initialTotalDuration = nil

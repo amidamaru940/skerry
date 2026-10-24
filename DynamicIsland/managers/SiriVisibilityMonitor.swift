@@ -32,6 +32,8 @@ final class SiriVisibilityMonitor: ObservableObject {
     private var isDisplayOn = true
     private var isPluggedIn = false
     private var isInLowPowerMode = false
+    /// Asleep or another user's session: nothing on this lock screen to hide.
+    private var screenInUse = true
     private var cancellables = Set<AnyCancellable>()
     
     // Hysteresis: Require multiple consecutive "not found" checks before declaring Siri gone
@@ -61,6 +63,13 @@ final class SiriVisibilityMonitor: ObservableObject {
             }
             .store(in: &cancellables)
             
+        ActivityGate.shared.publisher(for: .screenInUse)
+            .sink { [weak self] inUse in
+                self?.screenInUse = inUse
+                self?.updateMonitoringState()
+            }
+            .store(in: &cancellables)
+
         // Observe display sleep/wake
         let workspaceCenter = NSWorkspace.shared.notificationCenter
         workspaceCenter.addObserver(forName: NSWorkspace.screensDidSleepNotification, object: nil, queue: .main) { [weak self] _ in
@@ -112,25 +121,26 @@ final class SiriVisibilityMonitor: ObservableObject {
             effectiveMode = mode
         }
 
+        // Idle is waiting for Siri to appear on the lock screen: each look is
+        // a window list from WindowServer, so at most once a second. Upstream
+        // looked 5 times a second on the charger and twice on battery for as
+        // long as a locked screen stayed on. Active (Siri up) stays fast.
         let intervals: (idle: TimeInterval, active: TimeInterval)
         switch effectiveMode {
         case .highPerformance:
-            intervals = (idle: 0.2, active: 0.03) // ~33Hz active
+            intervals = (idle: 1.0, active: 0.03) // ~33Hz active
         case .balanced, .automatic:
-            intervals = (idle: 0.5, active: 0.06) // ~16Hz active (Fluid motion)
+            intervals = (idle: 1.0, active: 0.06) // ~16Hz active (Fluid motion)
         case .powerSaver:
             intervals = (idle: 2.0, active: 0.25) // 4Hz active, 0.5Hz idle
         }
         
-        print("⏱️ [SiriVisibilityMonitor] Mode: \(effectiveMode) (User Pref: \(mode)) -> Intervals: Idle \(intervals.idle)s, Active \(intervals.active)s")
         return intervals
     }
     
     private func updateMonitoringState() {
-        let shouldMonitor = isScreenLocked && isDisplayOn
-        
-        print("🔌 [SiriVisibilityMonitor] State Update - Locked: \(isScreenLocked), Display: \(isDisplayOn), Plugged: \(isPluggedIn), LPM: \(isInLowPowerMode)")
-        
+        let shouldMonitor = isScreenLocked && isDisplayOn && screenInUse
+
         if shouldMonitor {
             startMonitoring()
         } else {
@@ -153,7 +163,7 @@ final class SiriVisibilityMonitor: ObservableObject {
             monitoringTimer = Timer.scheduledTimer(withTimeInterval: currentInterval, repeats: true) { [weak self] _ in
                 self?.checkSiriVisibility()
             }
-            monitoringTimer?.tolerance = currentInterval * 0.1
+            monitoringTimer?.tolerance = currentInterval * 0.25
         }
     }
     

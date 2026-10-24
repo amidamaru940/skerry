@@ -39,7 +39,10 @@ class BluetoothAudioManager: ObservableObject {
     private var observers: [NSObjectProtocol] = []
     private var cancellables = Set<AnyCancellable>()
     private let coordinator = DynamicIslandViewCoordinator.shared
-    private var pollingTimer: Timer?
+    /// IOBluetooth's own connect notice, and one disconnect notice per
+    /// connected device: what replaced the 3-second scan of paired devices.
+    private var connectNotification: IOBluetoothUserNotification?
+    private var disconnectNotifications: [String: IOBluetoothUserNotification] = [:]
     private let bluetoothPreferencesSuite = "/Library/Preferences/com.apple.Bluetooth"
     private let batteryReader = BluetoothLEBatteryReader()
     private var isLiveBatteryRefreshInFlight = false
@@ -134,9 +137,17 @@ class BluetoothAudioManager: ObservableObject {
         setupBluetoothObservers()
         setupAirPodsListeningModeObservers()
         setupAirPodsListeningModeLogObserver()
-        startPollingForChanges()
 
-        // Deliberately deferred rather than called here.
+        // Deliberately deferred rather than called here, both of them.
+        //
+        // `startDeviceNotifications()` is IOBluetooth's connect notification.
+        // Its first use builds IOBluetoothCoreBluetoothCoordinator, whose init
+        // waits on a semaphore for work it queues on the main queue. This
+        // initialiser runs inside `AppDelegate.init`, on the main thread before
+        // the app's run loop exists, so with a Bluetooth audio device connected
+        // the wait never ended: Skerry hung at launch with no island (seen
+        // 21.10 with AirPods connected; `sample` showed the main thread in
+        // -[IOBluetoothCoreBluetoothCoordinator init] -> semaphore_wait_trap).
         //
         // `checkInitialDevices()` reaches `systemProfilerBluetoothDictionary()`,
         // which blocks on `Process.waitUntilExit()`. On the main thread that
@@ -153,7 +164,267 @@ class BluetoothAudioManager: ObservableObject {
         // Hopping to the next main-queue turn lets `shared` finish publishing
         // before any of that work runs, so the re-entry cannot happen.
         DispatchQueue.main.async { [weak self] in
-            self?.checkInitialDevices()
+            self?.startDeviceWatch()
+        }
+    }
+
+    // MARK: - Bluetooth permission
+    //
+    // Launch only reads the authorization (§5.8). Allowed: IOBluetooth and
+    // CoreBluetooth from launch, exactly as before. Not asked yet, or refused:
+    // no CBCentralManager and no IOBluetooth call; CoreAudio, which needs no
+    // permission, sees headphones arrive and leave (the name, no battery), and
+    // Bluetooth is asked only by `requestBatteryAccess()`, from a click.
+    //
+    // Existing installs: macOS's own record is the migration, so no flag is
+    // stored. A Mac that already allowed Bluetooth reads `.allowedAlways` at
+    // launch and keeps everything it had -- battery, IOBluetooth's notices,
+    // the BLE reader -- with no click. A Mac that refused is still not asked
+    // and now gets the name-only toast. A Mac whose answer was reset (tccutil,
+    // a new signing identity) reads `.notDetermined` like a fresh install and
+    // waits for the click: asking it again at launch would be exactly the
+    // launch prompt this removes (the R0 `tccutil reset` check).
+
+    /// Whether IOBluetooth may be called. Its first use builds
+    /// IOBluetoothCoreBluetoothCoordinator, which blocks the calling thread
+    /// until macOS has answered the Bluetooth question -- and with the
+    /// question still open (a build macOS has not seen, a reset permission)
+    /// no prompt appeared and the main thread waited for ever: no island at
+    /// launch, then a frozen one (21.10, `sample`: IOBluetoothHostController
+    /// defaultController / IOBluetoothCoreBluetoothCoordinator init, in
+    /// semaphore_wait_trap). Reading the authorization never blocks or asks.
+    static var bluetoothAllowed: Bool { CBManager.authorization == .allowedAlways }
+
+    /// Where connections are learnt from.
+    enum DeviceWatch: Equatable {
+        /// IOBluetooth's notices and paired devices, with battery levels.
+        case bluetooth
+        /// CoreAudio's output devices: the name only, and nothing is asked.
+        case audioDevices
+    }
+
+    static func deviceWatch(for authorization: CBManagerAuthorization) -> DeviceWatch {
+        authorization == .allowedAlways ? .bluetooth : .audioDevices
+    }
+
+    /// What a click that wants the battery shown can do.
+    enum BatteryAccess: Equatable {
+        /// Already allowed: start the Bluetooth watch if it is not running.
+        case allowed
+        /// Never asked: the system question, this once.
+        case ask
+        /// Refused or restricted: macOS will not ask again; only System
+        /// Settings can change it.
+        case refused
+    }
+
+    static func batteryAccess(for authorization: CBManagerAuthorization) -> BatteryAccess {
+        switch authorization {
+        case .allowedAlways: return .allowed
+        case .notDetermined: return .ask
+        default: return .refused
+        }
+    }
+
+    /// The «Показывать заряд наушников?» question is due while headphones are
+    /// connected and Bluetooth has never been asked, once per install.
+    static func isBatteryQuestionDue(
+        authorization: CBManagerAuthorization,
+        headphonesConnected: Bool,
+        questionShown: Bool
+    ) -> Bool {
+        headphonesConnected && authorization == .notDetermined && !questionShown
+    }
+
+    /// Hook for the «Показывать заряд наушников?» / "Show headphone battery?"
+    /// question (§4.2, §5.8). Nothing shows it yet.
+    // TODO(R11): show the question at the next open of the island while this
+    // is true (never while the screen is shared or the island is hidden) and
+    // call `batteryQuestionWasShown()`; its «Разрешить…» calls
+    // `requestBatteryAccess()`, and a grant is confirmed by the 2 s toast
+    // «AirPods Pro · 80 %».
+    @Published private(set) var isBatteryQuestionDue = false
+
+    /// The question was on screen: it does not come back on this install.
+    func batteryQuestionWasShown() {
+        Defaults[.bluetoothQuestionShown] = true
+        if isBatteryQuestionDue {
+            isBatteryQuestionDue = false
+        }
+    }
+
+    private var deviceWatch: DeviceWatch?
+    private let audioRouteObserver = BluetoothAudioRouteObserver()
+    /// The first CoreAudio report after the watch starts only fills the list,
+    /// as `checkInitialDevices()` does: headphones already on are no news.
+    private var hasAudioRouteBaseline = false
+    /// The authorization the last CoreAudio report carried, so the question
+    /// is worked out again only when it or the list changed.
+    private var audioRouteAuthorization: CBManagerAuthorization?
+    private var authorizationRequest: BluetoothAuthorizationRequest?
+
+    /// Picks the watch from what macOS has recorded, without asking.
+    private func startDeviceWatch() {
+        switch Self.deviceWatch(for: CBManager.authorization) {
+        case .bluetooth:
+            startBluetoothWatch()
+        case .audioDevices:
+            startAudioDeviceWatch()
+        }
+    }
+
+    /// Every caller has just seen `.allowedAlways` (launch, the hand-off from
+    /// CoreAudio) or the person's yes, so nothing here reads it again.
+    private func startBluetoothWatch() {
+        guard deviceWatch != .bluetooth else { return }
+        if deviceWatch == .audioDevices {
+            audioRouteObserver.stop()
+        }
+        deviceWatch = .bluetooth
+        if isBatteryQuestionDue {
+            isBatteryQuestionDue = false
+        }
+        batteryReader.start()
+        checkInitialDevices()
+        startDeviceNotifications()
+    }
+
+    private func startAudioDeviceWatch() {
+        guard deviceWatch == nil else { return }
+        print("🎧 [BluetoothAudioManager] Bluetooth not allowed; headphones are followed through CoreAudio, without battery")
+        deviceWatch = .audioDevices
+        hasAudioRouteBaseline = false
+        audioRouteAuthorization = nil
+        audioRouteObserver.onChange = { [weak self] report in
+            self?.applyAudioRouteReport(report)
+        }
+        audioRouteObserver.start()
+    }
+
+    /// Asks macOS for Bluetooth so the battery can be shown, and moves the
+    /// device watch to Bluetooth once it is allowed. The only place Skerry
+    /// asks for Bluetooth, and only from a click: today the Settings toggles
+    /// that turn a Bluetooth battery display on; later «Разрешить…» under
+    /// «Показывать заряд наушников?». CoreBluetooth asks on its own queue and
+    /// nothing waits for the answer.
+    func requestBatteryAccess() {
+        guard AppRuntimeEnvironment.mayAskForPermissions else { return }
+        // A Mac that allowed Bluetooth before this click is watching it
+        // already: there is nothing to ask, and nothing to read.
+        guard deviceWatch != .bluetooth else { return }
+        // The authorization is a TCC preflight, an XPC call to tccd: it is
+        // read off the main thread and acted on back on it.
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let authorization = CBManager.authorization
+            DispatchQueue.main.async {
+                self?.requestBatteryAccess(given: authorization)
+            }
+        }
+    }
+
+    private func requestBatteryAccess(given authorization: CBManagerAuthorization) {
+        guard AppRuntimeEnvironment.mayAskForPermissions else { return }
+        switch Self.batteryAccess(for: authorization) {
+        case .allowed:
+            startBluetoothWatch()
+        case .ask:
+            guard authorizationRequest == nil else { return }
+            authorizationRequest = BluetoothAuthorizationRequest { [weak self] allowed in
+                guard let self else { return }
+                self.authorizationRequest = nil
+                if allowed {
+                    self.startBluetoothWatch()
+                } else if self.isBatteryQuestionDue {
+                    self.isBatteryQuestionDue = false
+                }
+            }
+        case .refused:
+            // TODO(R11): the row's «Запрещено · Открыть Настройки…» (Privacy_Bluetooth).
+            print("🎧 [BluetoothAudioManager] Bluetooth was refused; only System Settings can allow it")
+        }
+    }
+
+    /// The connected list after CoreAudio reported `reported`, and the devices
+    /// that just arrived (none on the first report). Devices still there keep
+    /// their identity and their place; newcomers go at the end, as
+    /// IOBluetooth's path appends them, so the list's last device is the one
+    /// that just arrived whatever order CoreAudio lists them in (the lock
+    /// screen reads `.last`). Nothing here knows a battery level.
+    static func audioRouteUpdate(
+        known: [BluetoothAudioDevice],
+        reported: [BluetoothAudioRouteObserver.Device],
+        isFirstReport: Bool
+    ) -> (devices: [BluetoothAudioDevice], arrived: [BluetoothAudioDevice]) {
+        var devices = known.filter { device in
+            reported.contains { $0.address == device.address }
+        }
+        var arrived: [BluetoothAudioDevice] = []
+        for device in reported where !known.contains(where: { $0.address == device.address }) {
+            let audioDevice = BluetoothAudioDevice(
+                name: device.name,
+                address: device.address,
+                batteryLevel: nil,
+                deviceType: deviceType(forName: device.name) ?? .headphones
+            )
+            devices.append(audioDevice)
+            if !isFirstReport {
+                arrived.append(audioDevice)
+            }
+        }
+        return (devices, arrived)
+    }
+
+    /// Feeds what CoreAudio sees into the same state and the same connection
+    /// HUD as IOBluetooth's notices, with no battery level. The authorization
+    /// comes with the report, read on the observer's queue: nothing here
+    /// makes that TCC call on the main thread.
+    private func applyAudioRouteReport(_ report: BluetoothAudioRouteObserver.Report) {
+        // Bluetooth was allowed while this report was on its way.
+        guard deviceWatch == .audioDevices else { return }
+
+        let update = Self.audioRouteUpdate(
+            known: connectedDevices,
+            reported: report.devices,
+            isFirstReport: !hasAudioRouteBaseline
+        )
+        hasAudioRouteBaseline = true
+
+        // CoreAudio listing the same devices in another order leaves this
+        // list as it was; only a different one is published.
+        let listChanged = update.devices.map(\.id) != connectedDevices.map(\.id)
+        if listChanged {
+            let remaining = Set(update.devices.map(\.id))
+            connectedDevices.filter { !remaining.contains($0.id) }.forEach(cancelHUDBatteryWait(for:))
+            connectedDevices = update.devices
+            // The newcomer, as IOBluetooth's path sets it; after a departure
+            // the last one left, or nil, as its battery refresh does.
+            lastConnectedDevice = update.arrived.last ?? update.devices.last
+            isBluetoothAudioConnected = !update.devices.isEmpty
+        }
+
+        // The question turns only on the list and the authorization here;
+        // `batteryQuestionWasShown()` settles the third input itself.
+        if listChanged || report.authorization != audioRouteAuthorization {
+            audioRouteAuthorization = report.authorization
+            let due = Self.isBatteryQuestionDue(
+                authorization: report.authorization,
+                headphonesConnected: isBluetoothAudioConnected,
+                questionShown: Defaults[.bluetoothQuestionShown]
+            )
+            if isBatteryQuestionDue != due {
+                isBatteryQuestionDue = due
+            }
+        }
+
+        for device in update.arrived {
+            print("🎧 [BluetoothAudioManager] 🎉 Audio device connected (CoreAudio): \(device.name)")
+            presentDeviceConnectedHUD(device: device, batteryLevel: nil)
+        }
+
+        // Allowed in System Settings after a refusal, with no click here:
+        // this change hands the watch to Bluetooth, as the next launch would.
+        if Self.deviceWatch(for: report.authorization) == .bluetooth {
+            startBluetoothWatch()
         }
     }
     
@@ -205,12 +476,10 @@ class BluetoothAudioManager: ObservableObject {
             )
         }
 
-        dnc.addObserver(
-            self,
-            selector: #selector(handlePotentialAirPodsListeningModeNotification(_:)),
-            name: nil,
-            object: nil
-        )
+        // Upstream also observed every distributed notification in the
+        // session (name: nil), each one delivered to the main thread and its
+        // user info turned into text, all day. The names above are the ones
+        // it was looking for.
 
         let darwinCenter = CFNotificationCenterGetDarwinNotifyCenter()
         for name in listeningModeNotificationNames {
@@ -237,72 +506,64 @@ class BluetoothAudioManager: ObservableObject {
             }
         }
 
-        if Defaults[.showAirPodsListeningModeChanges] {
-            listeningModeLogObserver.start()
-        }
-
-        Defaults.publisher(.showAirPodsListeningModeChanges, options: [])
-            .sink { [weak self] change in
-                if change.newValue {
-                    self?.listeningModeLogObserver.start()
-                } else {
-                    self?.listeningModeLogObserver.stop()
-                }
-            }
-            .store(in: &cancellables)
-    }
-    
-    /// Starts polling for device connection changes (fallback mechanism)
-    private func startPollingForChanges() {
-        print("🎧 [BluetoothAudioManager] Starting polling timer (3s interval)...")
-        
-        pollingTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
-            self?.checkForDeviceChanges()
-        }
-    }
-    
-    /// Checks for device connection/disconnection changes
-    private func checkForDeviceChanges() {
-        // Check if Bluetooth is powered on
-        guard IOBluetoothHostController.default()?.powerState == kBluetoothHCIPowerStateON else {
-            // Bluetooth is off - clear connected devices if any
-            if !connectedDevices.isEmpty {
-                print("🎧 [BluetoothAudioManager] ⚠️ Bluetooth powered off - clearing connected devices")
-                connectedDevices.removeAll()
-                isBluetoothAudioConnected = false
-            }
-            return
-        }
-        
-        guard let pairedDevices = IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice] else {
-            return
-        }
-        
-        let currentlyConnectedAddresses = Set(
-            pairedDevices
-                .filter { $0.isConnected() && isAudioDevice($0) }
-                .compactMap { $0.addressString }
+        // `log stream` runs only while AirPods are connected and someone is
+        // at the Mac to see the mode change; upstream ran it from launch.
+        Publishers.CombineLatest3(
+            $connectedDevices.map { devices in devices.contains { $0.deviceType.isAirPods } }.removeDuplicates(),
+            Defaults.publisher(.showAirPodsListeningModeChanges).map(\.newValue),
+            ActivityGate.shared.publisher(for: .userPresent)
         )
-        
-        let previousAddresses = Set(connectedDevices.map { $0.address })
-        
-        // Check for new connections
-        let newAddresses = currentlyConnectedAddresses.subtracting(previousAddresses)
-        if !newAddresses.isEmpty {
-            print("🎧 [BluetoothAudioManager] 🔍 Polling detected new connection(s)")
-            checkForNewlyConnectedDevices()
+        .receive(on: DispatchQueue.main)
+        .sink { [weak self] hasAirPods, enabled, present in
+            if hasAirPods && enabled && present {
+                self?.listeningModeLogObserver.start()
+            } else {
+                self?.listeningModeLogObserver.stop()
+            }
         }
-        
-        // Check for disconnections
-        let removedAddresses = previousAddresses.subtracting(currentlyConnectedAddresses)
-        if !removedAddresses.isEmpty {
-            print("🎧 [BluetoothAudioManager] 🔍 Polling detected disconnection(s)")
-            updateConnectedDevices()
+        .store(in: &cancellables)
+    }
+    
+    /// Follows connections through IOBluetooth's notices. Upstream also asked
+    /// for every paired device every 3 seconds, from launch and for ever,
+    /// through sleep and lock, in case the distributed notices did not come.
+    private func startDeviceNotifications() {
+        guard Self.bluetoothAllowed, connectNotification == nil else { return }
+        connectNotification = IOBluetoothDevice.register(
+            forConnectNotifications: self,
+            selector: #selector(bluetoothDeviceConnected(_:device:))
+        )
+    }
+
+    /// A device connected (also called for those already connected when the
+    /// watch starts). Each one gets its own disconnect notice.
+    @objc private func bluetoothDeviceConnected(_ notification: IOBluetoothUserNotification, device: IOBluetoothDevice) {
+        watchDisconnection(of: device)
+        guard isAudioDevice(device) else { return }
+        invalidateProfilerSnapshot()
+        checkForNewlyConnectedDevices()
+    }
+
+    @objc private func bluetoothDeviceDisconnected(_ notification: IOBluetoothUserNotification, device: IOBluetoothDevice) {
+        notification.unregister()
+        if let address = device.addressString {
+            disconnectNotifications[address] = nil
         }
+        invalidateProfilerSnapshot()
+        updateConnectedDevices()
+    }
+
+    private func watchDisconnection(of device: IOBluetoothDevice) {
+        guard let address = device.addressString, disconnectNotifications[address] == nil else { return }
+        disconnectNotifications[address] = device.register(
+            forDisconnectNotification: self,
+            selector: #selector(bluetoothDeviceDisconnected(_:device:))
+        )
     }
     
     /// Checks for already connected Bluetooth audio devices on init
     private func checkInitialDevices() {
+        guard Self.bluetoothAllowed else { return }
         print("🎧 [BluetoothAudioManager] Checking for initially connected devices...")
         
         // Check if Bluetooth is powered on
@@ -319,6 +580,7 @@ class BluetoothAudioManager: ObservableObject {
         let connectedAudioDevices = pairedDevices.filter { device in
             device.isConnected() && isAudioDevice(device)
         }
+        connectedAudioDevices.forEach(watchDisconnection(of:))
         
         print("🎧 [BluetoothAudioManager] Found \(connectedAudioDevices.count) connected audio devices")
         
@@ -369,30 +631,6 @@ class BluetoothAudioManager: ObservableObject {
         scheduleEventDrivenListeningModeRefresh(reason: notification.name.rawValue)
     }
 
-    @objc private func handlePotentialAirPodsListeningModeNotification(_ notification: Notification) {
-        guard Defaults[.showAirPodsListeningModeChanges] else { return }
-        let name = notification.name.rawValue.lowercased()
-        let payload = notification.userInfo?
-            .map { "\($0.key)=\($0.value)" }
-            .joined(separator: " ")
-            .lowercased() ?? ""
-
-        let hasExplicitModePayload = payload.contains("listening") ||
-            payload.contains("lsnm") ||
-            payload.contains("noisecontrol") ||
-            payload.contains("anc") ||
-            payload.contains("transparency") ||
-            payload.contains("adaptive") ||
-            payload.contains("conversation")
-
-        let isSpecificSettingsNotification = name.contains("airpodspro.settingschanged") ||
-            name.contains("audioaccessory.prefschanged") ||
-            name.contains("controlcenter.airpods")
-
-        guard hasExplicitModePayload || isSpecificSettingsNotification else { return }
-        scheduleEventDrivenListeningModeRefresh(reason: notification.name.rawValue)
-    }
-
     private func handleAirPodsListeningModeDarwinNotification(_ name: String) {
         guard Defaults[.showAirPodsListeningModeChanges] else { return }
         scheduleEventDrivenListeningModeRefresh(reason: name)
@@ -417,6 +655,7 @@ class BluetoothAudioManager: ObservableObject {
     
     /// Checks for newly connected devices and displays HUD for new ones
     private func checkForNewlyConnectedDevices() {
+        guard Self.bluetoothAllowed else { return }
         // Check if Bluetooth is powered on
         guard IOBluetoothHostController.default()?.powerState == kBluetoothHCIPowerStateON else {
             print("🎧 [BluetoothAudioManager] ⚠️ Bluetooth is powered off - skipping device check")
@@ -462,7 +701,8 @@ class BluetoothAudioManager: ObservableObject {
     
     /// Updates the list of connected devices (for disconnections)
     private func updateConnectedDevices() {
-        guard let pairedDevices = IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice] else {
+        guard Self.bluetoothAllowed,
+              let pairedDevices = IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice] else {
             return
         }
         
@@ -810,12 +1050,34 @@ class BluetoothAudioManager: ObservableObject {
     
     /// Detects the type of audio device based on name and properties
     private func detectDeviceType(from device: IOBluetoothDevice, name: String) -> BluetoothAudioDeviceType {
-        let lowercaseName = name.lowercased()
-
         if let pidBasedType = airPodsTypeFromPID(device) {
             return pidBasedType
         }
-        
+
+        if let nameBasedType = Self.deviceType(forName: name) {
+            return nameBasedType
+        }
+
+        // Check device class for more specific detection
+        let deviceClass = device.classOfDevice
+        let minorClass = (deviceClass >> 2) & 0x3F
+
+        // Minor classes for audio devices
+        switch minorClass {
+        case 0x01: return .headphones  // Wearable Headset
+        case 0x02: return .headphones  // Hands-free
+        case 0x06: return .headphones  // Headphones
+        case 0x08: return .speaker     // Portable Audio
+        case 0x0C: return .speaker     // Loudspeaker
+        default: return .generic
+        }
+    }
+
+    /// The type a device's name gives away, or nil when it says nothing.
+    /// Shared by both watches: CoreAudio knows a name and nothing more.
+    static func deviceType(forName name: String) -> BluetoothAudioDeviceType? {
+        let lowercaseName = name.lowercased()
+
         // Check for specific AirPods models
         if lowercaseName.contains("airpods") {
             if lowercaseName.contains("max") {
@@ -853,27 +1115,22 @@ class BluetoothAudioManager: ObservableObject {
             return .beatssolo
         } else if lowercaseName.contains("speaker") || lowercaseName.contains("boombox") {
             return .speaker
-        } else if lowercaseName.contains("headphone") || lowercaseName.contains("headset") || 
+        } else if lowercaseName.contains("headphone") || lowercaseName.contains("headset") ||
                   lowercaseName.contains("buds") || lowercaseName.contains("earbuds") {
             return .headphones
         }
-        
-        // Check device class for more specific detection
-        let deviceClass = device.classOfDevice
-        let minorClass = (deviceClass >> 2) & 0x3F
-        
-        // Minor classes for audio devices
-        switch minorClass {
-        case 0x01: return .headphones  // Wearable Headset
-        case 0x02: return .headphones  // Hands-free
-        case 0x06: return .headphones  // Headphones
-        case 0x08: return .speaker     // Portable Audio
-        case 0x0C: return .speaker     // Loudspeaker
-        default: return .generic
-        }
+
+        return nil
     }
 
     private func refreshBatteryLevelsForConnectedDevices(forceCacheRefresh: Bool = true) {
+        // Before Bluetooth is allowed the island shows the name only (§5.8),
+        // and `system_profiler SPBluetoothDataType` runs as Skerry. The stored
+        // watch rather than a fresh TCC read: this runs on the main thread on
+        // every connect, disconnect and lock-screen refresh. A Mac that allowed
+        // Bluetooth is on `.bluetooth` from the first main-queue turn after
+        // launch, and `checkInitialDevices()` refreshes right after that.
+        guard deviceWatch == .bluetooth else { return }
         if forceCacheRefresh {
             updateBatteryStatuses(force: true)
         }
@@ -2096,7 +2353,8 @@ class BluetoothAudioManager: ObservableObject {
     }
 
     private func ioBluetoothDevice(for device: BluetoothAudioDevice) -> IOBluetoothDevice? {
-        guard let pairedDevices = IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice] else {
+        guard Self.bluetoothAllowed,
+              let pairedDevices = IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice] else {
             return nil
         }
 
@@ -2148,8 +2406,10 @@ class BluetoothAudioManager: ObservableObject {
     private func cleanup() {
         print("🎧 [BluetoothAudioManager] Cleaning up observers...")
         
-        pollingTimer?.invalidate()
-        pollingTimer = nil
+        connectNotification?.unregister()
+        connectNotification = nil
+        disconnectNotifications.values.forEach { $0.unregister() }
+        disconnectNotifications.removeAll()
         
         let dnc = DistributedNotificationCenter.default()
         dnc.removeObserver(self)
@@ -2184,6 +2444,7 @@ private final class AirPodsListeningModeLogObserver {
     var onModeChange: ((AirPodsListeningMode, String?) -> Void)?
 
     private var process: Process?
+    private var outputPipe: Pipe?
     private let queue = DispatchQueue(label: "com.dynamicisland.airpods-listening-log", qos: .utility)
     private var lineBuffer = ""
 
@@ -2206,15 +2467,26 @@ private final class AirPodsListeningModeLogObserver {
 
         outputPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
-            guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
+            guard !data.isEmpty else {
+                // End of file: left installed, the handler is called again at
+                // once, for ever (a core at 100% after `log` exits or stop()).
+                handle.readabilityHandler = nil
+                return
+            }
+            guard let text = String(data: data, encoding: .utf8) else { return }
             self?.queue.async {
                 self?.consume(text)
             }
+        }
+        // Gone on its own: start() may launch a new one.
+        process.terminationHandler = { [weak self] _ in
+            DispatchQueue.main.async { self?.process = nil }
         }
 
         do {
             try process.run()
             self.process = process
+            self.outputPipe = outputPipe
             print("🎧 [BluetoothAudioManager] AirPods listening mode log observer started")
         } catch {
             outputPipe.fileHandleForReading.readabilityHandler = nil
@@ -2223,6 +2495,9 @@ private final class AirPodsListeningModeLogObserver {
     }
 
     func stop() {
+        outputPipe?.fileHandleForReading.readabilityHandler = nil
+        outputPipe = nil
+        process?.terminationHandler = nil
         process?.terminate()
         process = nil
     }
@@ -2274,6 +2549,38 @@ private final class AirPodsListeningModeLogObserver {
 
 // MARK: - CoreBluetooth Battery Reader
 
+/// Asks for Bluetooth through CoreBluetooth on a private queue: creating the
+/// manager is what shows the question, and nothing here waits for the answer.
+/// `completion` runs once, on the main queue, with whether it was allowed.
+/// Made only by `BluetoothAudioManager.requestBatteryAccess()`, from a click.
+private final class BluetoothAuthorizationRequest: NSObject, CBCentralManagerDelegate {
+    private var central: CBCentralManager?
+    private var completion: ((Bool) -> Void)?
+
+    init(completion: @escaping (Bool) -> Void) {
+        self.completion = completion
+        super.init()
+        guard AppRuntimeEnvironment.mayAskForPermissions else { return }
+        central = CBCentralManager(
+            delegate: self,
+            queue: DispatchQueue(label: "io.github.amidamaru940.skerry.bluetooth-permission"),
+            options: [CBCentralManagerOptionShowPowerAlertKey: false]
+        )
+    }
+
+    func centralManagerDidUpdateState(_ central: CBCentralManager) {
+        let authorization = CBManager.authorization
+        guard authorization != .notDetermined else { return }
+        let allowed = authorization == .allowedAlways
+        DispatchQueue.main.async { [self] in
+            guard let completion else { return }
+            self.completion = nil
+            self.central = nil
+            completion(allowed)
+        }
+    }
+}
+
 private final class BluetoothLEBatteryReader: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     struct Lookup {
         let uuid: UUID
@@ -2308,10 +2615,15 @@ private final class BluetoothLEBatteryReader: NSObject, CBCentralManagerDelegate
     private var missingUUIDs: Set<UUID> = []
     private var timeoutWorkItem: DispatchWorkItem?
 
-    override init() {
-        super.init()
-        // Creating the manager is what asks for Bluetooth.
-        guard AppRuntimeEnvironment.mayAskForPermissions else { return }
+    /// Creating the manager is what asks for Bluetooth, so it is made only
+    /// once Bluetooth is allowed: `BluetoothAudioManager.startBluetoothWatch()`
+    /// calls this, at launch on a Mac that allowed it before (one main-queue
+    /// turn later than `init`, where it used to be made), otherwise once the
+    /// person said yes to `requestBatteryAccess()`. Its caller has the answer,
+    /// so this reads no authorization. Until then a battery read finds no
+    /// manager and reports nothing.
+    func start() {
+        guard AppRuntimeEnvironment.mayAskForPermissions, central == nil else { return }
         central = CBCentralManager(delegate: self, queue: nil)
     }
 

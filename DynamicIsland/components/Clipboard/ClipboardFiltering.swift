@@ -74,4 +74,17 @@ enum DayTimeLabel {
         }
         return "\(date.formatted(Date.FormatStyle().day().month(.abbreviated).locale(locale))) \(time)"
     }
+
+    /// The row's short form (Buffer v3): «12:31 PM» today, «Вчера»
+    /// yesterday, «21 окт.» before; the full one is in the row's tooltip.
+    static func compact(for date: Date, now: Date = Date(), calendar: Calendar = .current,
+                        bundle: Bundle = .main, locale: Locale = .current) -> String {
+        if calendar.isDate(date, inSameDayAs: now) {
+            return date.formatted(Date.FormatStyle(date: .omitted, time: .shortened).locale(locale))
+        }
+        if let yesterday = calendar.date(byAdding: .day, value: -1, to: now), calendar.isDate(date, inSameDayAs: yesterday) {
+            return bundle.localizedString(forKey: "Yesterday", value: "Yesterday", table: nil)
+        }
+        return date.formatted(Date.FormatStyle().day().month(.abbreviated).locale(locale))
+    }
 }

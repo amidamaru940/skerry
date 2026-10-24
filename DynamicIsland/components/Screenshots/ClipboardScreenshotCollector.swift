@@ -36,11 +36,14 @@ enum ClipboardShotLog {
 /// clipboard screenshots" is on. What counts as a clipboard screenshot: see ClipboardScreenshotDetector.
 /// The clipboard privacy rules (pause, concealed types, ignored apps) apply.
 final class ClipboardScreenshotCollector {
-    /// How often the clipboard is looked at. A burst of ⌃⇧⌘3 replaces the
-    /// clipboard picture every few tenths of a second; at 0.5 s, with the
-    /// file written on the main thread in between, half of a burst was
-    /// gone before anyone looked.
-    static let pollInterval: TimeInterval = 0.1
+    /// How often the clipboard is looked at during a burst. A burst of ⌃⇧⌘3
+    /// replaces the clipboard picture every few tenths of a second; at 0.5 s,
+    /// with the file written on the main thread in between, half of a burst
+    /// was gone before anyone looked. The fast look runs only for a few
+    /// seconds after an event (the screenshot shortcut's ⇧⌘ held, a
+    /// screenshot arriving); otherwise the shared once-a-second look of
+    /// `ClipboardChangeWatcher` is all there is.
+    static let pollInterval: TimeInterval = ClipboardChangeWatcher.burstInterval
 
     /// The picture as it was on the clipboard, still to be written.
     struct Shot {
@@ -48,38 +51,39 @@ final class ClipboardScreenshotCollector {
         let isPNG: Bool
     }
 
-    private var timer: Timer?
     private let pasteboard: NSPasteboard
     private let folder: URL
     private var lastChangeCount: Int
     private let onSaved: (URL, Date) -> Void
+    private let watcher: ClipboardChangeWatcher
+    private var watcherToken: UUID?
     /// Converting and writing happen here, in order, off the main thread.
     private let writeQueue = DispatchQueue(label: "io.github.amidamaru940.skerry.clipboard-shots", qos: .userInitiated)
 
     init(pasteboard: NSPasteboard = .general, folder: URL = TemporaryClipboardShots.folder,
+         watcher: ClipboardChangeWatcher? = nil,
          onSaved: @escaping (URL, Date) -> Void) {
         self.pasteboard = pasteboard
         self.folder = folder
         self.lastChangeCount = pasteboard.changeCount
         self.onSaved = onSaved
+        self.watcher = watcher ?? (pasteboard === NSPasteboard.general ? .shared : ClipboardChangeWatcher(pasteboard: pasteboard))
     }
 
-    var isRunning: Bool { timer != nil }
+    var isRunning: Bool { watcherToken != nil }
 
     func start() {
-        guard timer == nil else { return }
+        guard watcherToken == nil else { return }
         lastChangeCount = pasteboard.changeCount
-        // On the main run loop whatever thread starts it.
-        let timer = Timer(timeInterval: Self.pollInterval, repeats: true) { [weak self] _ in self?.poll() }
-        timer.tolerance = Self.pollInterval / 5
-        RunLoop.main.add(timer, forMode: .common)
-        self.timer = timer
+        // The shared watcher looks fast after ⇧⌘ and a few times after a
+        // mouse release (ClipboardChangeWatcher.startScreenshotEventMonitors).
+        watcherToken = watcher.add { [weak self] _ in self?.poll() }
         ClipboardShotLog.note("collector started (main thread: \(Thread.isMainThread))")
     }
 
     func stop() {
-        timer?.invalidate()
-        timer = nil
+        watcher.remove(watcherToken)
+        watcherToken = nil
     }
 
     /// Takes a new clipboard picture before the next one replaces it; the
@@ -91,6 +95,8 @@ final class ClipboardScreenshotCollector {
         let source = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
         ClipboardShotLog.note("change \(count): onlyPicture=\(ClipboardScreenshotDetector.holdsOnlyAPicture(pasteboard)) tool=\(ClipboardScreenshotDetector.isScreenshotToolRunning()) fullScreen=\(ClipboardScreenshotDetector.isFullScreenPicture(pasteboard))")
         guard let shot = Self.capture(from: pasteboard, sourceBundleID: source) else { return }
+        // More of a burst may follow (the toolbar's timer, a held shortcut).
+        if isRunning { watcher.burst() }
         let date = Date()
         let folder = folder, onSaved = onSaved
         writeQueue.async {

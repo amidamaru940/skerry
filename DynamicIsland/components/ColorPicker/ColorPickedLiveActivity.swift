@@ -16,6 +16,7 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 
+import AppKit
 import SwiftUI
 
 /// The closed island after a pick: the swatch on the left, the hex on the
@@ -42,6 +43,26 @@ struct ColorPickedLiveActivityContent: View {
 
     static let wingWidth: CGFloat = 72
 
+    /// The swatch flush left, the hex flush right, in equal wings (72 + 4).
+    static func closedGeometry(closedNotchWidth: CGFloat, hex: String) -> ClosedWingGeometry {
+        let wing = wingWidth + 4
+        return ClosedWingGeometry(
+            leadingWing: wing,
+            middle: closedNotchWidth,
+            trailingWing: wing,
+            leadingContent: 4 + 16,
+            trailingContent: ClosedWingE.measure(hex, font: .monospacedSystemFont(ofSize: 12, weight: .semibold)) + 4,
+            camera: ClosedWingE.cameraWidth(closedNotchWidth: closedNotchWidth)
+        )
+    }
+
+    /// The light of a picked colour (VISUAL-E §1.3): the colour itself,
+    /// moved into the band that reads on black.
+    static func light(of color: PickedColor) -> UInt32 {
+        func byte(_ v: Double) -> UInt32 { UInt32((min(max(v, 0), 1) * 255).rounded()) }
+        return LightColor.light(fromAverage: byte(color.red) << 16 | byte(color.green) << 8 | byte(color.blue))
+    }
+
     var body: some View {
         HStack(spacing: 0) {
             Circle()
@@ -64,6 +85,10 @@ struct ColorPickedLiveActivityContent: View {
                 .padding(.trailing, 4)
         }
         .frame(height: notchHeight, alignment: .center)
+        // E L10: the picked colour, clamped, as light under the swatch's wing.
+        .background(alignment: .bottom) {
+            ClosedStateLight(color: LightColor.color(Self.light(of: color)), wings: .leading, closedNotchWidth: notchWidth)
+        }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(Text("Picked color \(color.hexString), copied"))
     }
