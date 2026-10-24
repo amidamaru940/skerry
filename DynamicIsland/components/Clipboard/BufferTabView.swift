@@ -299,6 +299,9 @@ struct BufferTabView: View {
 
     private func closeSearch() {
         withAnimation(DS.spring) { state.closeSearch() }
+        // Typing is over: the keyboard goes back to the app in front, unless
+        // the island was opened by a shortcut or the pointer is on it (24.10).
+        DynamicIslandWindow.island(showing: vm)?.typingEnded()
     }
 
     /// The field takes the words' place, on the same hairline, no capsule:

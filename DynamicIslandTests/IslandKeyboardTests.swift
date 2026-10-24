@@ -20,6 +20,7 @@
 import AppKit
 import Defaults
 import KeyboardShortcuts
+import SwiftUI
 import XCTest
 
 /// Global shortcuts: no defaults, suggestions, duplicate check. Nothing here
@@ -154,6 +155,104 @@ final class IslandKeyboardTests: XCTestCase {
         // "Open only by click": hover never opens the island, a running timer included.
         XCTAssertFalse(IslandOpening.opensOnHover(openNotchOnHover: false))
         XCTAssertTrue(IslandOpening.opensOnHover(openNotchOnHover: true))
+    }
+
+    // MARK: Who takes the keyboard (24.10)
+
+    /// Dictation refused to start in the app in front while the island was key after a
+    /// click on the closed island's music wave: the closed island never takes
+    /// the keyboard on a click; the open one does, as before.
+    func testTheClosedIslandNeverTakesTheKeyboardOnAClick() {
+        for open in [true, false] {
+            XCTAssertTrue(IslandKeyboard.takesKeyboard(.shortcut, islandOpen: open))
+            XCTAssertFalse(IslandKeyboard.takesKeyboard(.hover, islandOpen: open))
+            XCTAssertTrue(IslandKeyboard.takesKeyboard(.click(.text), islandOpen: open))
+            XCTAssertTrue(IslandKeyboard.takesKeyboard(.click(.selection), islandOpen: open),
+                          "Delete on a tile must not reach the app in front")
+        }
+        XCTAssertFalse(IslandKeyboard.takesKeyboard(.click(.control), islandOpen: false), "the closed island's music wave")
+        XCTAssertTrue(IslandKeyboard.takesKeyboard(.click(.control), islandOpen: true),
+                      "Return, ⌘1…⌘9, Esc and ←/→ after a click on a filter or a button")
+    }
+
+    func testWhenTypingEndsTheKeysStayOnlyWithAShortcutOpenedIslandOrUnderThePointer() {
+        XCTAssertTrue(IslandKeyboard.keepsKeyboardAfterTyping(openedByShortcut: true, pointerOnIsland: false),
+                      "Esc, the arrows and ⌘1…⌘9 keep working")
+        XCTAssertTrue(IslandKeyboard.keepsKeyboardAfterTyping(openedByShortcut: false, pointerOnIsland: true),
+                      "it closes when the pointer leaves, and closing gives the keyboard back")
+        XCTAssertFalse(IslandKeyboard.keepsKeyboardAfterTyping(openedByShortcut: false, pointerOnIsland: false))
+    }
+
+    func testWhatAClickLandedOn() {
+        let field = NSTextField(frame: .zero)
+        XCTAssertEqual(DynamicIslandWindow.clickTarget(for: field), .text)
+        XCTAssertEqual(DynamicIslandWindow.clickTarget(for: NSTextView()), .text)
+        XCTAssertEqual(DynamicIslandWindow.clickTarget(for: NSTextField(labelWithString: "label")), .control)
+        XCTAssertEqual(DynamicIslandWindow.clickTarget(for: ScreenshotDragSourceView()), .selection)
+        XCTAssertEqual(DynamicIslandWindow.clickTarget(for: ShelfMarqueeSelectionView.MarqueeView()), .selection)
+        XCTAssertEqual(DynamicIslandWindow.clickTarget(for: DraggableClickHandler<EmptyView>.DraggableClickView()), .selection,
+                       "a shelf cell: ⌘A and Delete act on the selection")
+        let row = ClipboardCardInteractionView()
+        let inside = NSView()
+        row.addSubview(inside)
+        XCTAssertEqual(DynamicIslandWindow.clickTarget(for: row), .selection)
+        XCTAssertEqual(DynamicIslandWindow.clickTarget(for: inside), .selection, "found from the view under the pointer up")
+        XCTAssertEqual(DynamicIslandWindow.clickTarget(for: NSButton()), .control)
+        XCTAssertEqual(DynamicIslandWindow.clickTarget(for: nil), .control)
+    }
+
+    /// NSHostingView asks a panel to become key on any click, so the island's
+    /// own content says no; a SwiftUI text field inside still says yes.
+    @MainActor
+    func testOnlyTheTextFieldInTheIslandsContentAsksForTheKeyboard() {
+        let window = DynamicIslandWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 200, height: 60),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: true
+        )
+        XCTAssertTrue(window.becomesKeyOnlyIfNeeded)
+        struct Content: View {
+            @State var query = ""
+            var body: some View {
+                VStack(spacing: 0) {
+                    TextField("Search", text: $query).frame(width: 200, height: 30)
+                    Button("Pause") {}.frame(width: 200, height: 30)
+                }
+            }
+        }
+        let host = FirstMouseHostingView(rootView: Content())
+        host.frame = NSRect(x: 0, y: 0, width: 200, height: 60)
+        window.contentView = host
+        host.layoutSubtreeIfNeeded()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        host.layoutSubtreeIfNeeded()
+        XCTAssertFalse(host.needsPanelToBecomeKey)
+
+        // Window coordinates: the field is the top half, the button the bottom.
+        let fieldHit = window.contentView?.superview?.hitTest(NSPoint(x: 100, y: 45))
+        XCTAssertEqual(fieldHit?.needsPanelToBecomeKey, true, String(describing: fieldHit))
+        XCTAssertEqual(DynamicIslandWindow.clickTarget(for: fieldHit), .text)
+        let buttonHit = window.contentView?.superview?.hitTest(NSPoint(x: 100, y: 15))
+        XCTAssertEqual(buttonHit?.needsPanelToBecomeKey, false, String(describing: buttonHit))
+        XCTAssertEqual(DynamicIslandWindow.clickTarget(for: buttonHit), .control)
+    }
+
+    /// Under tests the island is never key, but it still notes the shortcut.
+    @MainActor
+    func testOnlyTheShortcutMarksTheIslandAsOpenedByIt() {
+        let window = DynamicIslandWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 200, height: 40),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: true
+        )
+        window.takeKeyboard(.hover)
+        window.takeKeyboard(.click(.selection))
+        XCTAssertFalse(window.openedByShortcut)
+        window.takeKeyboard(.shortcut)
+        XCTAssertTrue(window.openedByShortcut)
+        XCTAssertFalse(window.isKeyWindow)
     }
 
     func testHoverDelayLabel() {

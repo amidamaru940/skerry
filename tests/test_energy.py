@@ -168,6 +168,15 @@ class ProcessTests(unittest.TestCase):
         self.assertIn("publisher(for: .screenInUse)", controller)
         self.assertNotIn("await self?.processJSONStream()", controller, "the task kept the controller alive")
 
+    def test_listeners_of_gone_audio_processes_are_not_removed(self):
+        # 24.10: removing them only logged "no object with given ID" each
+        # time an app stopped playing.
+        activity = without_comments(source("audio/AudioOutputActivity.swift"))
+        sync = activity[activity.index("func syncProcesses()"):activity.index("private func removeProcessListener")]
+        self.assertNotIn("removeProcessListener(", sync)
+        stop = activity[activity.index("func stop()"):activity.index("func syncProcesses()")]
+        self.assertIn("where present.contains(object)", stop)
+
 
 class AnimationTests(unittest.TestCase):
     def test_the_idle_animation_does_not_loop_for_ever(self):
@@ -207,6 +216,29 @@ class NetworkTests(unittest.TestCase):
     def test_the_route_watch_pauses_while_away(self):
         network = without_comments(source("managers/NetworkConnectivityManager.swift"))
         self.assertIn("ActivityGate.shared.publisher(for: .userPresent)", network)
+
+    def test_the_battery_reader_lets_go_of_every_connection_it_opens(self):
+        # 24.10: a battery read that timed out left its LE connect request
+        # pending in bluetoothd for as long as Skerry ran, and a finished one
+        # kept its link, beside the LE traffic Handoff and Universal
+        # Clipboard need.
+        manager = without_comments(source("managers/BluetoothAudioManager.swift"))
+        reader = manager[manager.index("class BluetoothLEBatteryReader"):manager.index("struct BluetoothAudioDevice")]
+
+        def body(signature):
+            start = reader.index(signature)
+            return reader[start:reader.index("\n    }\n", start)]
+
+        self.assertEqual(1, reader.count("central.connect("), "one place connects")
+        self.assertNotIn("EnableAutoReconnect", reader)
+        configure = body("func configurePeripheral(")
+        self.assertLess(configure.index("openedPeripherals[peripheral.identifier] = peripheral"),
+                        configure.index("central.connect("))
+        self.assertIn("central.cancelPeripheralConnection(peripheral)", body("func releasePeripheral("))
+        self.assertIn("releasePeripheral(identifier)", body("func complete("), "timeout and the end of a read")
+        self.assertIn("releasePeripheral(identifier)", body("func markPeripheralFinished("))
+        self.assertIn("central.cancelPeripheralConnection(peripheral)",
+                      body("didConnect peripheral: CBPeripheral)"), "a late connection is let go")
 
 
 class ScriptTests(unittest.TestCase):

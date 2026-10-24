@@ -5,6 +5,19 @@ All notable changes to Skerry are documented here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). For the history
 before the fork, see [Atoll's changelog](https://github.com/Ebullioscopic/Atoll/blob/dev/CHANGELOG.md).
 
+## [1.1.9] — 2026-10-24
+
+### Fixed
+- **Dictation (F5) switched on and straight off after a click on the closed island.** The island took the keyboard and kept it for half a minute, so macOS had no text field to dictate into. A click on the closed island no longer takes the keyboard; the open island takes it only for its own controls, the shortcut, or a text field.
+- **Bluetooth connections left open.** Reading AirPods' and other devices' battery opened Bluetooth LE connections and never closed them; they are now closed when each read ends or times out (Handoff and Universal Clipboard share Bluetooth LE).
+- **Copies from the iPhone were downloaded in every format at once.** On each copy Skerry read the picture, the text and the rich text to learn which one it was; it now reads only the one it keeps.
+- Fewer CoreAudio log errors when an app that played sound quits.
+
+## [1.1.8] — 2026-10-24
+
+### Changed
+- **"Do Not Disturb" is the moon alone.** The Focus name beside it made the closed island as wide as the name on both sides and covered the menus of the app in front. The name can still be turned on in Settings.
+
 ## [1.1.7] — 2026-10-23
 
 ### Added

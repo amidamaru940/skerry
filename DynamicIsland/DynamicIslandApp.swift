@@ -87,6 +87,16 @@ final class FirstMouseHostingView<Content: View>: NSHostingView<Content> {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
         true
     }
+
+    /// The island's SwiftUI content (its buttons, empty space, the closed
+    /// island) does not ask AppKit to make the island key on a click: the
+    /// island decides in `sendEvent` (open: yes, closed: no). NSHostingView
+    /// says yes for all of it, which made `becomesKeyOnlyIfNeeded` on the
+    /// island do nothing. Text fields and text views inside are AppKit views
+    /// that still say yes for themselves (24.10).
+    override var needsPanelToBecomeKey: Bool {
+        false
+    }
 }
 
 extension AppDelegate {
@@ -1453,13 +1463,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Makes the island of `viewModel` the key window without activating the
     /// app (it is a non-activating panel), so Esc, the arrows and the tab keys
-    /// reach it. The island hands the keyboard back when it closes.
+    /// reach it. The island hands the keyboard back when it closes. Only the
+    /// shortcuts call this: opened by a shortcut, the island keeps its keys
+    /// while the search field opens and closes in it (24.10).
     @MainActor
     private func giveKeyboardFocus(to viewModel: DynamicIslandViewModel) {
         let window: NSWindow? = Defaults[.showOnAllDisplays]
             ? windows.first(where: { viewModels[$0.key] === viewModel })?.value
             : self.window
-        window?.makeKey()
+        if let island = window as? DynamicIslandWindow {
+            island.takeKeyboard(.shortcut)
+        } else {
+            window?.makeKey()
+        }
     }
 
     // Cancel the auto-close armed by `toggleNotchOpen`. Switching to the clipboard tab

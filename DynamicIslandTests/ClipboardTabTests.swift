@@ -331,6 +331,86 @@ final class ClipboardTabManagerTests: XCTestCase {
         ClipboardPaster.remember(NSRunningApplication.current)
         XCTAssertNotEqual(ClipboardPaster.lastExternalApp?.bundleIdentifier, Bundle.main.bundleIdentifier)
     }
+
+    // MARK: Universal Clipboard (24.10)
+
+    /// A rich copy from the iPhone is read as its RTF alone: the plain text
+    /// and the HTML stay where they are (each read pulls one over the air).
+    func testARichCopyIsReadAsItsRichTextAlone() {
+        let rtf = NSAttributedString(string: "Hello").rtf(from: NSRange(location: 0, length: 5), documentAttributes: [:])!
+        let promised = PromisedPasteboardData(promising: [
+            (.string, Data("Hello".utf8)), (.rtf, rtf), (.html, Data("<b>Hello</b>".utf8)),
+        ])
+        promised.write(to: pasteboard)
+        XCTAssertEqual(manager.captureChange(from: pasteboard, sourceBundleID: nil), .record)
+        settle()
+        XCTAssertEqual(manager.clipboardHistory.first?.type, .rtf)
+        XCTAssertEqual(manager.clipboardHistory.first?.stringData, "Hello")
+        XCTAssertEqual(promised.read, [.rtf])
+    }
+
+    func testAPictureWithItsLinkIsReadAsThePictureAlone() {
+        let promised = PromisedPasteboardData(promising: [
+            (.png, pngData()), (.tiff, Data([0x4D, 0x4D])), (.string, Data("https://example.org/p.png".utf8)),
+        ])
+        promised.write(to: pasteboard)
+        manager.captureChange(from: pasteboard, sourceBundleID: nil)
+        settle()
+        XCTAssertEqual(manager.clipboardHistory.first?.type, .image)
+        XCTAssertEqual(promised.read, [.png], "the TIFF and the link were read only to see they exist")
+    }
+
+    func testAPlainLinkIsReadOnceAsText() {
+        let promised = PromisedPasteboardData(promising: [(.string, Data("https://example.org".utf8))])
+        promised.write(to: pasteboard)
+        manager.captureChange(from: pasteboard, sourceBundleID: nil)
+        settle()
+        XCTAssertEqual(manager.clipboardHistory.first?.type, .url)
+        XCTAssertEqual(promised.read, [.string])
+    }
+
+    func testAFileCopyLeavesItsIconUnread() throws {
+        let file = directory.appendingPathComponent("notes.txt")
+        try Data("notes".utf8).write(to: file)
+        let promised = PromisedPasteboardData(promising: [(.tiff, Data([0x4D, 0x4D]))], eager: [(.fileURL, file.absoluteString)])
+        promised.write(to: pasteboard)
+        manager.captureChange(from: pasteboard, sourceBundleID: "com.apple.finder")
+        settle()
+        XCTAssertEqual(manager.clipboardHistory.first?.type, .file)
+        XCTAssertEqual(promised.read, [], "Finder's icon is not the copy")
+    }
+
+    func testThePictureTypesAreTriedInOrder() {
+        XCTAssertEqual(ClipboardRepresentation.imageTypes(in: [.string, .tiff, .png]), [.png, .tiff])
+        XCTAssertEqual(ClipboardRepresentation.imageTypes(in: [.init("public.jpeg"), .html]), [.init("public.jpeg")])
+        XCTAssertEqual(ClipboardRepresentation.imageTypes(in: [.string, .rtf]), [])
+    }
+}
+
+/// A copy whose data comes only when it is read, like one made on the iPhone
+/// and offered through Universal Clipboard; notes which types were read.
+private final class PromisedPasteboardData: NSObject, NSPasteboardItemDataProvider {
+    private let promised: [(NSPasteboard.PasteboardType, Data)]
+    private let eager: [(NSPasteboard.PasteboardType, String)]
+    private(set) var read: [NSPasteboard.PasteboardType] = []
+
+    init(promising promised: [(NSPasteboard.PasteboardType, Data)], eager: [(NSPasteboard.PasteboardType, String)] = []) {
+        self.promised = promised
+        self.eager = eager
+    }
+
+    func write(to pasteboard: NSPasteboard) {
+        pasteboard.clearContents()
+        let item = NSPasteboardItem()
+        for (type, value) in eager { item.setString(value, forType: type) }
+        item.setDataProvider(self, forTypes: promised.map { $0.0 })
+        pasteboard.writeObjects([item])
+    }
+
+    func pasteboard(_ pasteboard: NSPasteboard?, item: NSPasteboardItem, provideDataForType type: NSPasteboard.PasteboardType) {
+        read.append(type)
+        if let data = promised.first(where: { $0.0 == type })?.1 { item.setData(data, forType: type) }
+    }
 }
 
 // MARK: - Dragging out

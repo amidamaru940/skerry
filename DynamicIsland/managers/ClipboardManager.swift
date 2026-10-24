@@ -834,12 +834,16 @@ class ClipboardManager: ObservableObject {
     
     private func getCurrentClipboardItem(from pasteboard: NSPasteboard) -> ClipboardItem? {
         
-        // Step 1: Check what types are available
+        // Step 1: Check what types are available. From the types the
+        // pasteboard lists, not from their data: a copy on the iPhone comes
+        // through Universal Clipboard as promises, and each read pulls that
+        // representation over Bluetooth/Wi-Fi. Reading PNG, TIFF, JPEG and
+        // text just to see which exist pulled all of them on every change;
+        // now only the one the entry keeps is read (24.10).
+        let types = pasteboard.types ?? []
         let hasFileURLs = pasteboard.canReadObject(forClasses: [NSURL.self], options: nil)
-        let hasImageData = pasteboard.data(forType: .png) != nil || 
-                          pasteboard.data(forType: .tiff) != nil || 
-                          pasteboard.data(forType: NSPasteboard.PasteboardType("public.jpeg")) != nil
-        let hasString = pasteboard.string(forType: .string) != nil
+        let imageTypes = ClipboardRepresentation.imageTypes(in: types)
+        let hasImageData = !imageTypes.isEmpty
         
         // Step 2: Smart detection based on context
         
@@ -877,13 +881,13 @@ class ClipboardManager: ObservableObject {
         }
         
         // Priority 2: If there's ONLY image data without file URLs (screenshots, direct image paste)
+        // PNG, then TIFF, then JPEG, as before; a listed type whose data does not come
+        // falls through to the next one.
         if hasImageData && !hasFileURLs {
-            if let imageData = pasteboard.data(forType: .png) {
-                return ClipboardItem(imageData: imageData)
-            } else if let imageData = pasteboard.data(forType: .tiff) {
-                return ClipboardItem(imageData: imageData)
-            } else if let imageData = pasteboard.data(forType: NSPasteboard.PasteboardType("public.jpeg")) {
-                return ClipboardItem(imageData: imageData)
+            for type in imageTypes {
+                if let imageData = pasteboard.data(forType: type) {
+                    return ClipboardItem(imageData: imageData)
+                }
             }
         }
         
@@ -892,10 +896,13 @@ class ClipboardManager: ObservableObject {
         // exposes an `https://` string *and* RTF/HTML, and must not be flattened to a bare URL.
         let richText = pasteboard.rtfDataWithFallback()
 
+        // Priority 4 (below) keeps rich text with its own plain text: the string is read
+        // only without it (24.10), and then once for both the URL and plain-text checks.
+        let string = richText == nil ? pasteboard.string(forType: .string) : nil
+
         // Priority 3: Plain-text URLs stay typed as `.url` (address-bar copies carry no RTF).
         // Only when there is no usable rich representation — otherwise the formatting wins.
-        if let string = pasteboard.string(forType: .string), !string.isEmpty,
-           richText == nil,
+        if let string, !string.isEmpty,
            string.hasPrefix("http://") || string.hasPrefix("https://") {
             return ClipboardItem(stringData: string, type: .url)
         }
@@ -912,7 +919,7 @@ class ClipboardManager: ObservableObject {
         }
 
         // Priority 5: Plain text
-        if let string = pasteboard.string(forType: .string), !string.isEmpty {
+        if let string, !string.isEmpty {
             return ClipboardItem(stringData: string, type: .text)
         }
 
@@ -1092,6 +1099,18 @@ private extension NSPasteboard {
             return (rtf, attributed.string)
         }
         return nil
+    }
+}
+
+/// Which representations a clipboard change is read in (24.10): the kind is
+/// told from the listed types, and only the chosen one is read.
+enum ClipboardRepresentation {
+    /// The picture types the history keeps, in the order they are tried.
+    static let pictureTypes: [NSPasteboard.PasteboardType] = [.png, .tiff, .init("public.jpeg")]
+
+    /// The picture types `types` lists, in that order.
+    static func imageTypes(in types: [NSPasteboard.PasteboardType]) -> [NSPasteboard.PasteboardType] {
+        pictureTypes.filter(types.contains)
     }
 }
 

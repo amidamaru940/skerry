@@ -90,6 +90,62 @@ enum IslandKeyboard {
     }
 }
 
+/// Why the island would take the keyboard from the app in front (24.10).
+/// While the island is the key window the app in front has no text input:
+/// dictation (F5) refused to start in that app for half a minute after a
+/// click on the closed island's music wave made it key; it stayed closed,
+/// so nothing gave the keyboard back (23.10).
+enum IslandKeyboardRequest: Equatable {
+    /// Opened, or switched to a tab, by a keyboard shortcut.
+    case shortcut
+    /// Opened by hovering.
+    case hover
+    /// A click, by what it landed on.
+    case click(IslandClickTarget)
+}
+
+/// What a click in the island landed on.
+enum IslandClickTarget: Equatable {
+    /// A text field, the notes editor, the terminal.
+    case text
+    /// A screenshot tile, a clipboard row or card, the shelf and its cells.
+    /// Their keys (Space, Delete, ⌘A, ⌘C, Return, ⌘1…⌘9) act on what was
+    /// clicked, and would otherwise reach the app in front: Delete would
+    /// erase text there.
+    case selection
+    /// A button, a filter word, a tab, empty space, the closed island.
+    case control
+}
+
+extension IslandKeyboard {
+    /// A shortcut takes the keyboard, hovering never does. A click into a
+    /// field, a row or a tile does, and so does any click in the open
+    /// island, as before: Return, ⌘1…⌘9, Esc and ←/→ keep working after a
+    /// click on a filter or a button, and closing gives the keyboard back.
+    /// A click on a button or empty space of the closed island does not:
+    /// it stays closed, so nothing gave the keyboard back.
+    static func takesKeyboard(_ request: IslandKeyboardRequest, islandOpen: Bool) -> Bool {
+        switch request {
+        case .shortcut:
+            return true
+        case .hover:
+            return false
+        case .click(let target):
+            return target != .control || islandOpen
+        }
+    }
+
+    /// When typing ends (the search field closes), an island opened by a
+    /// shortcut keeps its keys (Esc, the arrows, ⌘1…⌘9). So does one the
+    /// pointer is on: it closes when the pointer leaves, and closing gives
+    /// the keyboard back. Handing it back while the island stays on screen
+    /// orders the island out for a moment, which would blink the open island
+    /// under the person's eyes.
+    static func keepsKeyboardAfterTyping(openedByShortcut: Bool, pointerOnIsland: Bool) -> Bool {
+        openedByShortcut || pointerOnIsland
+    }
+}
+
 extension NotchTabLayout {
     /// The tab after (or before) `current` among `visible`, wrapping around.
     /// From a view that is not a visible tab: the first (or last) tab.

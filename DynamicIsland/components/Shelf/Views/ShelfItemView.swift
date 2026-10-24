@@ -244,7 +244,8 @@ struct ShelfItemView: View {
 }
 
 // MARK: - Draggable Click Handler with NSDraggingSource
-private struct DraggableClickHandler<Content: View>: NSViewRepresentable {
+// Not private: the keyboard tests make its cell view (24.10).
+struct DraggableClickHandler<Content: View>: NSViewRepresentable {
     let item: ShelfItem
     let viewModel: ShelfItemViewModel
     let isHovering: Bool
@@ -295,7 +296,9 @@ private struct DraggableClickHandler<Content: View>: NSViewRepresentable {
         return viewModel.thumbnail ?? viewModel.icon ?? NSImage()
     }
     
-    final class DraggableClickView: NSView, NSDraggingSource {
+    /// A click on a cell selects it, and its keys (⌘A, Delete) act on the
+    /// selection: the island takes the keyboard for it (24.10).
+    final class DraggableClickView: NSView, NSDraggingSource, IslandSelectionClickView {
         // Registered with `ShelfItemHitRegistry` so marquee selection can read
         // this cell's frame without walking the view hierarchy.
         var item: ShelfItem! {

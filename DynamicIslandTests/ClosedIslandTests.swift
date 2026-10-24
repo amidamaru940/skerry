@@ -198,6 +198,17 @@ final class ClosedIslandTests: XCTestCase {
         XCTAssertLessThanOrEqual(DoNotDisturbLiveActivity.labelWidth("Работа над очень длинным проектом и ещё немного"), ClosedWingE.textCap)
     }
 
+    /// «Не беспокоить» is the moon alone by default: the name made both wings
+    /// as wide as itself and covered the app's menus (23.10). The name stays
+    /// a setting.
+    func testFocusIsTheMoonAloneByDefault() {
+        XCTAssertFalse(Defaults.Keys.showDoNotDisturbLabel.defaultValue)
+        let moon = DoNotDisturbLiveActivity.closedGeometry(closedNotchWidth: 185, showsGlyph: true, label: nil)
+        let named = DoNotDisturbLiveActivity.closedGeometry(closedNotchWidth: 185, showsGlyph: true, label: "Не беспокоить")
+        XCTAssertEqual(moon.leadingWing, moon.trailingWing)
+        XCTAssertLessThan(moon.width, named.width - 100, "far narrower than with the name")
+    }
+
     // MARK: Shelf flash
 
     func testOnlyFilesNewSinceTheLastLookCount() {

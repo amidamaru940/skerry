@@ -24,6 +24,12 @@ import Cocoa
 import Combine
 import SwiftTerm
 
+/// A view whose keys act on what a click on it selected, where its type
+/// cannot be named in `DynamicIslandWindow.clickTarget`: the shelf cell sits
+/// inside a generic SwiftUI wrapper. Its mouseDown does not take the first
+/// responder, so ⌘A and Delete went to the app in front (24.10).
+protocol IslandSelectionClickView: AnyObject {}
+
 class DynamicIslandWindow: NSPanel {
     static let pinnedCollectionBehavior: NSWindow.CollectionBehavior = [
         .fullScreenAuxiliary,
@@ -61,6 +67,15 @@ class DynamicIslandWindow: NSPanel {
         isReleasedWhenClosed = false
         level = .mainMenu + 3
         hasShadow = false
+        // A click makes the island key only on a view that asks for it: a
+        // text field or text view (AppKit's needsPanelToBecomeKey), or what
+        // `sendEvent` lets in by `IslandKeyboard.takesKeyboard`: any click
+        // in the open island, none on a button of the closed one. A click on
+        // the closed island's music wave made it key; it stayed closed, and
+        // the app in front lost its keyboard and dictation until the next
+        // click elsewhere (24.10). The island's hosting view says no for
+        // itself (FirstMouseHostingView), so the decision is `sendEvent`'s.
+        becomesKeyOnlyIfNeeded = true
 
         ScreenCaptureVisibilityManager.shared.register(self, scope: .entireInterface)
     }
@@ -109,10 +124,62 @@ class DynamicIslandWindow: NSPanel {
     /// Called when an island key was handled (keeps a shortcut-opened island open).
     var onIslandKeyCommand: (() -> Void)?
     private var islandStateObserver: AnyCancellable?
+    /// Opened (or switched to a tab) by a shortcut since it last closed: its
+    /// keys stay when typing in it ends.
+    private(set) var openedByShortcut = false
 
     override func sendEvent(_ event: NSEvent) {
         if event.type == .keyDown, handleIslandKey(event) { return }
+        if event.type == .leftMouseDown { takeKeyboardIfTheClickAsks(event) }
         super.sendEvent(event)
+    }
+
+    /// The island of `viewModel`, for views that ask for the keyboard.
+    static func island(showing viewModel: DynamicIslandViewModel) -> DynamicIslandWindow? {
+        NSApp.windows.lazy
+            .compactMap { $0 as? DynamicIslandWindow }
+            .first { $0.islandViewModel === viewModel }
+    }
+
+    /// Makes the island the key window, without activating Skerry, when
+    /// `request` is one the person asked keys for (24.10).
+    func takeKeyboard(_ request: IslandKeyboardRequest) {
+        guard IslandKeyboard.takesKeyboard(request, islandOpen: islandViewModel?.notchState == .open) else { return }
+        if request == .shortcut { openedByShortcut = true }
+        guard canBecomeKey, !isKeyWindow else { return }
+        makeKey()
+    }
+
+    /// Typing in the island ended (the search field closed): the keyboard
+    /// goes back to the app in front unless the island keeps it (24.10).
+    func typingEnded() {
+        let pointerOnIsland = frame.contains(NSEvent.mouseLocation)
+        guard !IslandKeyboard.keepsKeyboardAfterTyping(openedByShortcut: openedByShortcut,
+                                                        pointerOnIsland: pointerOnIsland) else { return }
+        returnKeyboardIfNeeded()
+    }
+
+    /// AppKit is asked only by text fields (needsPanelToBecomeKey); the
+    /// open island's buttons, rows and tiles and the terminal are let in here.
+    private func takeKeyboardIfTheClickAsks(_ event: NSEvent) {
+        guard !isKeyWindow, canBecomeKey else { return }
+        // The frame view has no superview: the point is in window coordinates.
+        let hit = contentView?.superview?.hitTest(event.locationInWindow)
+        takeKeyboard(.click(Self.clickTarget(for: hit)))
+    }
+
+    /// What a click landed on, from the view under the pointer up.
+    static func clickTarget(for view: NSView?) -> IslandClickTarget {
+        var current = view
+        while let view = current {
+            if typesText(view) || (view as? NSTextField)?.isEditable == true { return .text }
+            if view is ScreenshotDragSourceView || view is ClipboardCardInteractionView
+                || view is ShelfMarqueeSelectionView.MarqueeView || view is IslandSelectionClickView {
+                return .selection
+            }
+            current = view.superview
+        }
+        return .control
     }
 
     /// Esc, ←/→ and Tab/⇧Tab in the open island, unless a text field, the
@@ -153,7 +220,10 @@ class DynamicIslandWindow: NSPanel {
             .removeDuplicates()
             .filter { $0 == .closed }
             .receive(on: RunLoop.main)
-            .sink { [weak self] _ in self?.returnKeyboardIfNeeded() }
+            .sink { [weak self] _ in
+                self?.openedByShortcut = false
+                self?.returnKeyboardIfNeeded()
+            }
     }
 
     /// Hands the keyboard back now from every island that holds it: a paste

@@ -91,7 +91,9 @@ final class AudioOutputActivity {
             AudioObjectRemovePropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &address, .main, listListener)
             self.listListener = nil
         }
-        for (object, block) in processListeners {
+        let present = Set(AudioProcessQuery.processObjectIDs())
+        // Only processes still there have listeners to remove (see syncProcesses).
+        for (object, block) in processListeners where present.contains(object) {
             removeProcessListener(object, block)
         }
         processListeners.removeAll()
@@ -103,8 +105,10 @@ final class AudioOutputActivity {
     private func syncProcesses() {
         guard isWatching else { return }
         let current = Set(AudioProcessQuery.processObjectIDs())
-        for (object, block) in processListeners where !current.contains(object) {
-            removeProcessListener(object, block)
+        // A process that left took its object with it: removing its
+        // listeners failed anyway and only logged «no object with given ID»
+        // each time an app stopped playing (24.10). They are just forgotten.
+        for object in processListeners.keys where !current.contains(object) {
             processListeners[object] = nil
         }
         for object in current where processListeners[object] == nil {

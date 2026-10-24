@@ -1581,7 +1581,10 @@ extension Defaults.Keys {
     static let enableDoNotDisturbDetection = Key<Bool>("enableDoNotDisturbDetection", default: true)
     static let focusMonitoringMode = Key<FocusMonitoringMode>("focusMonitoringMode", default: .withoutDevTools)
     static let showDoNotDisturbIndicator = Key<Bool>("showDoNotDisturbIndicator", default: true)
-    static let showDoNotDisturbLabel = Key<Bool>("showDoNotDisturbLabel", default: true)
+    /// The Focus name beside the moon. Off by default: «Не беспокоить» took
+    /// two wings as wide as the name and covered the menus of the app in
+    /// front; the moon alone keeps the island narrow (owner, 23.10).
+    static let showDoNotDisturbLabel = Key<Bool>("showDoNotDisturbLabel", default: false)
     static let focusIndicatorNonPersistent = Key<Bool>("focusIndicatorNonPersistent", default: false)
     
     // MARK: Privacy Indicators (Camera & Microphone Detection)

@@ -164,24 +164,26 @@ struct DoNotDisturbLiveActivity: View {
             return manager.isDoNotDisturbActive ? "On" : "Off"
         }
 
-        let trimmed = manager.currentFocusModeName.trimmingCharacters(in: .whitespacesAndNewlines)
-        if showLabelSetting {
-            if !trimmed.isEmpty {
-                return trimmed
-            } else if focusMode == .doNotDisturb {
-                return "Do Not Disturb"
-            } else {
-                let fallback = focusMode.displayName
-                return fallback.isEmpty ? "Focus" : fallback
-            }
-        }
+        return showLabelSetting ? focusName : ""
+    }
 
-        return ""
+    /// The Focus mode's name, shown or not: VoiceOver says it either way
+    /// (the moon alone is the default since 1.1.8).
+    private var focusName: String {
+        let trimmed = manager.currentFocusModeName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty {
+            return trimmed
+        } else if focusMode == .doNotDisturb {
+            return "Do Not Disturb"
+        } else {
+            let fallback = focusMode.displayName
+            return fallback.isEmpty ? "Focus" : fallback
+        }
     }
 
     private var accessibilityDescription: String {
         if manager.isDoNotDisturbActive {
-            return "Focus active: \(labelText)"
+            return "Focus active: \(focusName)"
         } else {
             return "Focus inactive"
         }

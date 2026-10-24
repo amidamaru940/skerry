@@ -2614,6 +2614,14 @@ private final class BluetoothLEBatteryReader: NSObject, CBCentralManagerDelegate
     private var results: [UUID: Result] = [:]
     private var missingUUIDs: Set<UUID> = []
     private var timeoutWorkItem: DispatchWorkItem?
+    /// Peripherals this reader asked CoreBluetooth to connect, until it lets
+    /// go of them. A connect request never times out by itself: a read that
+    /// timed out left its request pending in bluetoothd for as long as
+    /// Skerry ran, and a finished read kept its link open, beside the LE
+    /// traffic Handoff and Universal Clipboard need (24.10). Kept until
+    /// cancelled, even after a disconnect: cancelling a link that is already
+    /// gone does nothing, and a request made again in between is let go too.
+    private var openedPeripherals: [UUID: CBPeripheral] = [:]
 
     /// Creating the manager is what asks for Bluetooth, so it is made only
     /// once Bluetooth is allowed: `BluetoothAudioManager.startBluetoothWatch()`
@@ -2672,6 +2680,13 @@ private final class BluetoothLEBatteryReader: NSObject, CBCentralManagerDelegate
     }
 
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
+        // A connection that comes in after its read ended is let go at once
+        // instead of staying open (24.10).
+        guard state == .requesting, pendingPeripherals[peripheral.identifier] != nil else {
+            openedPeripherals.removeValue(forKey: peripheral.identifier)
+            central.cancelPeripheralConnection(peripheral)
+            return
+        }
         peripheral.discoverServices([Self.batteryServiceUUID])
     }
 
@@ -2791,13 +2806,25 @@ private final class BluetoothLEBatteryReader: NSObject, CBCentralManagerDelegate
         case .connected:
             peripheral.discoverServices([Self.batteryServiceUUID])
         default:
+            openedPeripherals[peripheral.identifier] = peripheral
             central.connect(peripheral, options: nil)
         }
+    }
+
+    /// Cancels the connection this reader opened to `identifier`, pending or
+    /// made; a link the system or another app holds stays up (CoreBluetooth
+    /// drops only this app's claim). Nothing here connects again: only a new
+    /// `fetchBatteryLevels` does.
+    private func releasePeripheral(_ identifier: UUID) {
+        guard let peripheral = openedPeripherals.removeValue(forKey: identifier) else { return }
+        central.cancelPeripheralConnection(peripheral)
     }
 
     private func markPeripheralFinished(_ identifier: UUID) {
         pendingPeripherals.removeValue(forKey: identifier)
         missingUUIDs.remove(identifier)
+        // Its battery is read (or could not be): the link is not needed.
+        releasePeripheral(identifier)
 
         if missingUUIDs.isEmpty {
             central.stopScan()
@@ -2828,6 +2855,10 @@ private final class BluetoothLEBatteryReader: NSObject, CBCentralManagerDelegate
         cancelTimeout()
         central.stopScan()
         state = .idle
+        // Done or timed out: every connection still open or pending goes.
+        for identifier in Array(openedPeripherals.keys) {
+            releasePeripheral(identifier)
+        }
 
         pendingPeripherals.removeAll()
         missingUUIDs.removeAll()
